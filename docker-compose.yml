@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: test-automation-db
+    environment:
+      POSTGRES_DB: test_automation
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  playwright-mcp:
+    build:
+      context: ./backend/mcp-server
+      dockerfile: Dockerfile
+    container_name: playwright-mcp-server
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: test-automation-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      playwright-mcp:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/test_automation
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      MCP_PLAYWRIGHT_ENABLED: true
+      MCP_PLAYWRIGHT_SERVER_URL: http://playwright-mcp:3000
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend/screenshots:/tmp/screenshots
+
+volumes:
+  postgres-data:

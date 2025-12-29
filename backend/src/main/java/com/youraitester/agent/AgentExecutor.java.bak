@@ -1,0 +1,856 @@
+package com.youraitester.agent;
+
+import com.youraitester.agent.impl.SimpleMessage;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Generic Agent Executor
+ * Works with any LLM provider (OpenAI, Claude, etc.) and MCP tools
+ */
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AgentExecutor {
+    
+    private final Map<String, LlmProvider> providers;
+    private final McpToolExecutor mcpToolExecutor;
+    
+    @Value("${agent.llm.provider:openai}")
+    private String defaultProviderName;
+    
+    @Value("${agent.max.iterations:15}")
+    private int maxIterations;
+    
+    @Value("${agent.system.prompt.file:agent-system-prompt.txt}")
+    private String systemPromptFile;
+    
+    private String cachedSystemPrompt = null;
+    
+    /**
+     * Load system prompt from file. Caches the result to avoid repeated file reads.
+     */
+    private String loadSystemPrompt() {
+        if (cachedSystemPrompt != null) {
+            return cachedSystemPrompt;
+        }
+        
+        try {
+            // Try to load from the file specified in config
+            Path promptPath = Paths.get(systemPromptFile);
+            if (!promptPath.isAbsolute()) {
+                // If relative path, look in current directory (where jar is run from)
+                promptPath = Paths.get(System.getProperty("user.dir"), systemPromptFile);
+            }
+            
+            if (Files.exists(promptPath)) {
+                log.info("Loading agent system prompt from file: {}", promptPath);
+                cachedSystemPrompt = Files.readString(promptPath);
+                log.info("System prompt loaded successfully ({} characters)", cachedSystemPrompt.length());
+                return cachedSystemPrompt;
+            } else {
+                log.warn("System prompt file not found: {}. Using default prompt.", promptPath);
+                return getDefaultSystemPrompt();
+            }
+        } catch (IOException e) {
+            log.error("Failed to load system prompt from file: {}. Using default prompt.", systemPromptFile, e);
+            return getDefaultSystemPrompt();
+        }
+    }
+    
+    /**
+     * Get default system prompt if file is not available
+     */
+    private String getDefaultSystemPrompt() {
+        return "You are an autonomous web automation agent with access to Playwright MCP tools. " +
+               "Always call getContent() first to analyze the page structure before performing any actions. " +
+               "Use standard CSS selectors only - no :contains(), :has-text(), or XPath. " +
+               "Break down complex tasks into sub-steps and verify completion.";
+    }
+    
+    /**
+     * Execute an instruction using the agent
+     * The agent will use the configured LLM and MCP tools to complete the task
+     */
+    public AgentExecutionResult execute(String instruction, String pageContext) {
+        return execute(instruction, pageContext, new HashMap<>());
+    }
+    
+    /**
+     * Execute an instruction using the agent with variables
+     * The agent will use the configured LLM and MCP tools to complete the task
+     * Variables can be substituted in instructions and extracted from results
+     */
+    public AgentExecutionResult execute(String instruction, String pageContext, Map<String, Object> variables) {
+        log.info("Agent executing instruction: {}", instruction);
+        if (!variables.isEmpty()) {
+            log.debug("Agent has {} variables available: {}", variables.size(), variables.keySet());
+        }
+        
+        // Get the configured provider
+        LlmProvider provider = getProvider(defaultProviderName);
+        if (!provider.isAvailable()) {
+            return AgentExecutionResult.error("LLM provider " + defaultProviderName + " is not available");
+        }
+        
+        // Get available MCP tools
+        List<LlmProvider.Tool> tools = mcpToolExecutor.getAvailableTools();
+        log.debug("Agent has {} MCP tools available", tools.size());
+        
+        // Substitute variables in instruction
+        String substitutedInstruction = substituteVariables(instruction, variables);
+        if (!substitutedInstruction.equals(instruction)) {
+            log.debug("Instruction after variable substitution: {}", substitutedInstruction);
+        }
+        
+        // Build conversation
+        List<LlmProvider.Message> messages = new ArrayList<>();
+        
+        // Load system prompt from file
+        String systemPrompt = loadSystemPrompt();
+        messages.add(SimpleMessage.system(systemPrompt));
+            "You are an autonomous web automation agent with access to Playwright MCP tools. " +
+            "You can break down high-level tasks into sub-actions and execute them intelligently.\n" +
+            "\n## AUTONOMY & TASK DECOMPOSITION:\n" +
+            "When given a high-level instruction (e.g., 'search for flights from LAX to Las Vegas'):\n" +
+            "1. **Analyze the page** first using getContent() and/or visionAnalyze to understand the interface\n" +
+            "2. **Break down the task** into logical sub-steps in your mind\n" +
+            "3. **Execute each sub-step** using the appropriate tools\n" +
+            "4. **Adapt** if something fails - try alternative approaches\n" +
+            "5. **Verify** the task is complete before finishing\n" +
+            "\nYou have full autonomy to decide how to accomplish the task, but you must follow the technical rules below.\n" +
+            "\n## CRITICAL RULE: ALWAYS call getContent() first to analyze the page before performing any action (click, type, select, assert). This is mandatory.\n" +
+            "\n## MANDATORY WORKFLOW BEFORE CLICKING:\n" +
+            "Before attempting ANY click action, you MUST:\n" +
+            "1. Call getContent() to see the HTML structure\n" +
+            "2. **Check if your selector might match multiple elements** - Look for:\n" +
+            "   - Multiple elements with the same class/id/attribute in the HTML\n" +
+            "   - Common patterns: navigation links (multiple a[href='/X']), buttons with same class, etc.\n" +
+            "   - If you see the same selector pattern appearing multiple times, assume multiple matches\n" +
+            "3. **If multiple elements might match, you MUST use visionAnalyze BEFORE clicking:**\n" +
+            "   - DO NOT attempt to click - Playwright will pick the first one which might be wrong/not visible\n" +
+            "   - Use visionAnalyze to identify which element is correct based on context\n" +
+            "   - Then use clickAtCoordinates with coordinates from visionAnalyze\n" +
+            "4. **Only if you're certain the selector matches a single unique element, proceed with click()**\n" +
+            "\n**Example workflow:**\n" +
+            "- Task: Click the flights link\n" +
+            "- Step 1: getContent() → See HTML\n" +
+            "- Step 2: Check for a[href='/flights'] → See it appears 3 times (navigation, footer, sidebar)\n" +
+            "- Step 3: **STOP - multiple matches detected!** Use visionAnalyze({question: 'Where is the flights link in the top navigation menu?'})\n" +
+            "- Step 4: visionAnalyze returns coordinates → clickAtCoordinates({x: 150, y: 50}) ✅\n" +
+            "\n**NEVER skip step 2-3 - always check for multiple matches before clicking!**\n" +
+            "\n## HANDLING MULTIPLE MATCHING ELEMENTS - CRITICAL:\n" +
+            "When a CSS selector matches **multiple elements** on the page, you MUST use vision to determine which one is correct:\n" +
+            "\n**CRITICAL UNDERSTANDING:**\n" +
+            "- When you use a CSS selector that matches multiple elements, Playwright will automatically pick the FIRST one\n" +
+            "- The first element might not be visible, might be the wrong one, or might be in the wrong location\n" +
+            "- You MUST proactively check if multiple elements match BEFORE attempting to click\n" +
+            "- If multiple elements match, you MUST use vision to identify the correct one\n" +
+            "\n**WRONG APPROACH (will click wrong element or timeout):**\n" +
+            "❌ getContent() → Find selector a[href='/flights'] → Try to click it → Playwright finds 3 matches, picks first one → First one not visible → TIMEOUT!\n" +
+            "❌ Ignoring that multiple elements might match → Just trying to click without checking → Wrong element or not visible!\n" +
+            "\n**CORRECT APPROACH - ALWAYS check for multiple matches BEFORE clicking:**\n" +
+            "1. **After getContent(), BEFORE clicking, check if selector might match multiple elements:**\n" +
+            "   - Look at the HTML structure - are there multiple elements with the same class/id/attribute?\n" +
+            "   - Common cases: navigation links (multiple a[href='/X']), buttons with same class, etc.\n" +
+            "   - If you see the same selector pattern appearing multiple times in getContent(), assume multiple matches\n" +
+            "2. **If multiple elements might match, ALWAYS use visionAnalyze FIRST:**\n" +
+            "   - DO NOT attempt to click until you've identified which element is correct\n" +
+            "   - Use visionAnalyze to understand which element is the correct one based on:\n" +
+            "     * Context: What text is nearby? What section of the page is it in?\n" +
+            "     * Position: Where is it located on the screen? (top navigation, sidebar, main content, footer, etc.)\n" +
+            "     * Visual appearance: What does it look like? (button style, link style, etc.)\n" +
+            "     * Relationship to other elements: What is it next to or near? (e.g., 'flights link in navigation next to Hotels')\n" +
+            "3. **After visionAnalyze identifies the correct element:**\n" +
+            "   - Option A: Use clickAtCoordinates with the coordinates from visionAnalyze (RECOMMENDED)\n" +
+            "   - Option B: Use visionAnalyze insights to construct a more specific CSS selector\n" +
+            "     * If vision shows it's in a specific container, add that to selector\n" +
+            "     * If vision shows it's near specific text, use structural selectors\n" +
+            "\n**Example: Clicking 'flights' link when multiple exist:**\n" +
+            "1. getContent() → See HTML with multiple a[href='/flights'] elements (in navigation, footer, etc.)\n" +
+            "2. **BEFORE clicking, recognize multiple matches exist**\n" +
+            "3. **Use visionAnalyze FIRST:** visionAnalyze({question: 'Where is the flights navigation link in the main top navigation menu? Which flights link is visible in the top navigation bar next to Hotels and Cars links?'})\n" +
+            "4. visionAnalyze returns: 'Found flights link at coordinates (x: 150, y: 50) in the top navigation bar, next to Hotels and Cars links'\n" +
+            "5. clickAtCoordinates({x: 150, y: 50}) ✅\n" +
+            "\n**Key Principle:** ALWAYS check for multiple matches BEFORE clicking. If multiple elements match:\n" +
+            "- Use visionAnalyze to identify the correct one based on context\n" +
+            "- Use clickAtCoordinates with coordinates from vision\n" +
+            "- DO NOT let Playwright pick the first one automatically - you must identify which one is correct\n" +
+            "\n## Important: If an action fails because an element is not visible or blocked by an overlay, look for and dismiss any pop-ups, modals, or cookie banners first, then retry the action. If multiple elements match a selector, always use visionAnalyze to identify the correct one based on context.\n" +
+            "\n## CSS SELECTOR RULES - STRICTLY ENFORCED:\n" +
+            "MANDATORY: You MUST use ONLY standard CSS selectors. NO pseudo-selectors allowed.\n" +
+            "\n❌ ABSOLUTELY FORBIDDEN (will crash and cause errors):\n" +
+            "  - :contains('text') - jQuery only, NOT supported\n" +
+            "  - :has-text('text') - Playwright locator only, NOT supported\n" +
+            "  - :text('text') - Playwright locator only, NOT supported\n" +
+            "  - Any selector combining pseudo-selectors with other selectors (e.g., 'div.class:contains(text) + div')\n" +
+            "  - XPath selectors (//div, /html/body, etc.)\n" +
+            "  - getBy* methods (getByText, getByRole, etc.)\n" +
+            "\n✅ ALWAYS USE THESE STANDARD CSS SELECTORS:\n" +
+            "1. **Class selectors**: button.[className], div.[modal-class], .[element-class] - extract class=\"...\" from HTML\n" +
+            "2. **ID selectors**: #[elementId], #[button-id] - extract id=\"...\" from HTML\n" +
+            "3. **Attribute selectors**: button[aria-label=\"Submit\"], input[type=\"text\"], div[data-testid=\"item\"]\n" +
+            "4. **Structural selectors**: div.[parent-class] > button, form button.[class], div.[container-class] .[child-class] - extract from actual HTML structure\n" +
+            "5. **Nth-child (standard CSS)**: li:nth-child(2), div:first-child, tr:last-child\n" +
+            "6. **Sibling selectors**: div.class1 + div.class2, span ~ button\n" +
+            "CRITICAL: Replace [className], [elementId], [parent-class], etc. with ACTUAL values from getContent() HTML!\n" +
+            "\n📋 WORKFLOW for finding selectors - CRITICAL:\n" +
+            "1. **Call getContent() FIRST** - This is mandatory to see the actual HTML structure\n" +
+            "2. **Find the EXACT selector from the HTML** - Look for:\n" +
+            "   - class=\"xyz\" → Use `.xyz` (e.g., if class=\"iconAllowance__1_z1h\", use `.iconAllowance__1_z1h`)\n" +
+            "   - id=\"abc\" → Use `#abc` (e.g., if id=\"departureDate\", use `#departureDate`)\n" +
+            "   - name=\"xyz\" → Use `[name=\"xyz\"]` (e.g., if name=\"departureDate\", use `input[name=\"departureDate\"]`)\n" +
+            "   - aria-label=\"xyz\" → Use `[aria-label=\"xyz\"]` or `[aria-label*=\"partial\"]`\n" +
+            "   - data attributes → Use `[data-attr=\"value\"]`\n" +
+            "3. **USE THE EXACT SELECTOR FROM HTML** - DO NOT make up selectors based on instruction text!\n" +
+            "   ❌ WRONG: Instruction says 'depart date' → Using `input.depart-date` (this class doesn't exist!)\n" +
+            "   ✅ CORRECT: getContent() shows id=\"departureDate\" → Use `#departureDate`\n" +
+            "   ✅ CORRECT: getContent() shows class=\"inputElement__BlDZa\" → Use `.inputElement__BlDZa`\n" +
+            "   ✅ CORRECT: getContent() shows name=\"departureDate\" → Use `input[name=\"departureDate\"]`\n" +
+            "4. **If you need to find an element by its text content or label:**\n" +
+            "   a. Use getContent() to find the element's actual class/id/name/aria-label in the HTML\n" +
+            "   b. Use that EXACT selector from the HTML - don't infer or guess!\n" +
+            "   c. If no good selector exists in HTML, use visionAnalyze to locate it visually, then clickAtCoordinates\n" +
+            "5. **NEVER infer selectors from instruction text** - Always use the exact selectors from getContent() HTML\n" +
+            "6. NEVER use :contains() or :has-text() - they will cause errors\n" +
+            "\nExample 1: HTML shows <button class=\"trip-option\">One-way</button>\n" +
+            "✅ CORRECT: click({selector: 'button.trip-option'})\n" +
+            "❌ WRONG: click({selector: 'button:has-text(\"One-way\")'}) ← WILL CRASH!\n" +
+            "❌ WRONG: click({selector: 'button:contains(\"One-way\")'}) ← WILL CRASH!\n" +
+            "\nExample 2: Need to find price for a specific item\n" +
+            "❌ WRONG: Using :contains() or :has() with text matching - these will CRASH!\n" +
+            "❌ WRONG: '[item-name-class]:contains(\"Item Name\") + [price-class]' ← :contains() is FORBIDDEN!\n" +
+            "❌ WRONG: '[item-class]:has(.[name-class]:contains('Item')) .[price-class]' ← :contains() is FORBIDDEN!\n" +
+            "❌ WRONG: Any selector using :contains() or :has() with text matching ← WILL CRASH!\n" +
+            "✅ CORRECT APPROACH:\n" +
+            "   1. getContent() to see HTML structure\n" +
+            "   2. Find the class/id of the price element in actual HTML (e.g., class=\"product-price\")\n" +
+            "   3. If you need a specific item's price:\n" +
+            "      a. Look for unique identifiers in getContent() (data attributes, IDs, nth-child if items are in order)\n" +
+            "      b. Use structural selector with ACTUAL classes from HTML: '[item-class]:nth-child(3) .[price-class]'\n" +
+            "      c. OR use visionAnalyze to locate the specific item visually, then use clickAtCoordinates or construct selector based on visual context\n" +
+            "      d. NEVER use :contains() or :has() with text matching - these will cause errors!\n" +
+            "   4. If multiple items exist and you need a specific one, use:\n" +
+            "      - nth-child if order is predictable: '[item-class]:nth-child(2) .[price-class]' (with ACTUAL classes)\n" +
+            "      - visionAnalyze to find it visually, then clickAtCoordinates or construct selector\n" +
+            "      - Generic selector if checking any item: '[item-class] .[price-class]' (with ACTUAL classes)\n" +
+            "   3. If multiple prices exist, use structural selectors with ACTUAL classes from HTML\n" +
+            "   4. Or use visionAnalyze to locate visually, then clickAtCoordinates\n" +
+            "\n## Dropdown Interactions - ABSOLUTELY CRITICAL:\n" +
+            "When selecting from a dropdown (e.g., 'select one-way for the dropdown meant for selecting trip type'):\n" +
+            "\n**CRITICAL UNDERSTANDING:**\n" +
+            "- Dropdown options are usually **NOT visible in the initial HTML** - they are hidden until the dropdown is opened\n" +
+            "- You **MUST open the dropdown first** before you can select an option\n" +
+            "- If you see an option selector in getContent() but it's not visible/clickable, it means the dropdown is closed\n" +
+            "- NEVER try to click an option directly without opening the dropdown first - it will timeout!\n" +
+            "\n**WRONG APPROACH (will timeout):**\n" +
+            "❌ getContent() → See button[data-value='oneway'] in HTML → Try to click it directly → TIMEOUT!\n" +
+            "❌ Trying to click option selectors (button[data-value='X'], .option-X, etc.) without opening dropdown first\n" +
+            "\n**CORRECT APPROACH - Follow this EXACT sequence:**\n" +
+            "1. **getContent() first (MANDATORY)** - Analyze the page structure\n" +
+            "2. **Identify the dropdown trigger/button** - Look for:\n" +
+            "   - A button or element that opens the dropdown (often has text like 'Round-trip', 'One-way', or an icon)\n" +
+            "   - Common patterns: button with class like '.dropdown-toggle', '.select-button', '[role=\"button\"]', or a button containing the current selection text\n" +
+            "   - May have attributes like aria-expanded=\"false\", aria-haspopup=\"true\", or data attributes\n" +
+            "   - If you see the current selection text (e.g., 'Round-trip'), that's likely the dropdown trigger\n" +
+            "3. **Click the dropdown trigger** - Use CSS selector to click the button that opens the dropdown\n" +
+            "   - Example: click({selector: 'button[aria-haspopup=\"true\"]'}) or click({selector: 'button.dropdown-toggle'})\n" +
+            "   - If not found in HTML: Use visionAnalyze to locate the dropdown visually → clickAtCoordinates\n" +
+            "4. **Wait for dropdown to open** - After clicking, the dropdown options should appear\n" +
+            "5. **getContent() again (MANDATORY)** - Call getContent() IMMEDIATELY after opening dropdown to see the options that are NOW visible in HTML\n" +
+            "6. **Find the option's selector** - In the new HTML, find the class/id/attribute of the option you want to select\n" +
+            "   - Look for: button[data-value='oneway'], .option-oneway, li[data-value='oneway'], etc.\n" +
+            "7. **Click the option** - Use CSS selector to click the option: click({selector: 'button[data-value=\"oneway\"]'})\n" +
+            "\n**Example: 'select one-way for the dropdown meant for selecting trip type':**\n" +
+            "1. getContent() → See button with text 'Round-trip' (current selection) and class from actual HTML (e.g., class=\"[actual-button-class]\")\n" +
+            "2. Click dropdown trigger: click({selector: 'button.[actual-button-class]'}) ✅ (using actual class from HTML)\n" +
+            "3. getContent() → NOW see options with actual selectors from HTML: button[data-value='roundtrip'], button[data-value='oneway'], etc.\n" +
+            "4. Click option: click({selector: 'button[data-value=\"oneway\"]'}) ✅ (using actual selector from HTML)\n" +
+            "\n**Key Principle:** Dropdown options are hidden until the dropdown is opened. Always:\n" +
+            "- Step 1: Find and click the dropdown trigger/button\n" +
+            "- Step 2: getContent() to see the now-visible options\n" +
+            "- Step 3: Click the desired option\n" +
+            "\n❌ FORBIDDEN: Trying to click option selectors without opening dropdown first - they're not visible/clickable!\n" +
+            "❌ FORBIDDEN: Using visionAnalyze to find options after dropdown is open - they're in the HTML after getContent()!\n" +
+            "✅ CORRECT: Open dropdown → getContent() → Click option using CSS selector\n" +
+            "\n## Date Input Interactions - ABSOLUTELY CRITICAL:\n" +
+            "When entering a date using a date input field (e.g., 'enter Jan 2 2026 in depart date using the date pop up'):\n" +
+            "\n**CRITICAL UNDERSTANDING:**\n" +
+            "- Date input fields often have calendar popups that are **NOT visible initially** - they must be triggered by clicking the date input field\n" +
+            "- You **MUST click the date input field first** to open the calendar popup before you can select a date\n" +
+            "- If you try to use visionAnalyze to find the calendar popup without clicking the date field first, it won't be visible\n" +
+            "- NEVER try to find or interact with the calendar popup before clicking the date input field - it won't exist yet!\n" +
+            "\n**WRONG APPROACH (will fail):**\n" +
+            "❌ getContent() → See date input field → Try to use visionAnalyze to find calendar popup → Calendar not visible → ERROR!\n" +
+            "❌ Trying to find calendar popup without clicking the date input field first\n" +
+            "\n**CORRECT APPROACH - Follow this EXACT sequence:**\n" +
+            "1. **getContent() first (MANDATORY)** - Analyze the page structure\n" +
+            "2. **Identify the date input field** - Look for:\n" +
+            "   - Input elements with type=\"date\" or type=\"text\" that have date-related classes/ids\n" +
+            "   - Common patterns: input[type=\"date\"], input.[date-class], input[placeholder*=\"date\"], etc. (extract actual classes from HTML)\n" +
+            "   - May have labels like 'Depart date', 'Return date', 'Check-in', 'Check-out', etc.\n" +
+            "   - Often has a calendar icon next to it\n" +
+            "3. **Click the date input field** - Use CSS selector from ACTUAL HTML to click the date input field to trigger the calendar popup\n" +
+            "   - Pattern: click({selector: 'input.[actual-date-class]'}) or click({selector: 'input[type=\"date\"]'})\n" +
+            "   - Use ACTUAL selectors from getContent() HTML, not generic examples!\n" +
+            "   - If not found in HTML: Use visionAnalyze to locate the date input field visually → clickAtCoordinates\n" +
+            "4. **Wait for calendar popup to appear** - After clicking, the calendar popup should appear\n" +
+            "5. **getContent() again (MANDATORY)** - Call getContent() IMMEDIATELY after clicking to see the calendar popup that is NOW visible in HTML\n" +
+            "6. **Find and select the date** - In the new HTML, find the date element and click it:\n" +
+            "   - Look for date elements in the calendar (e.g., button with date text, td with date, etc.)\n" +
+            "   - Use CSS selector to click the specific date: click({selector: 'button[data-date=\"2026-01-02\"]'}) or similar\n" +
+            "   - If dates are not in HTML or hard to select: Use visionAnalyze to locate the date visually → clickAtCoordinates\n" +
+            "\n**Example: 'enter Jan 2 2026 in depart date using the date pop up':**\n" +
+            "1. getContent() → See HTML like: `<input id=\"departureDate\" class=\"iconAllowance__1_z1h inputElement__BlDZa\" name=\"departureDate\" aria-label=\"Depart date...\">`\n" +
+            "2. **Use EXACT selector from HTML** - NOT inferred from instruction text!\n" +
+            "   ❌ WRONG: Using `input.[made-up-class]` (this class doesn't exist in HTML!)\n" +
+            "   ✅ CORRECT: Use `#departureDate` (from actual id attribute in HTML)\n" +
+            "   ✅ CORRECT: Use `input[name=\"departureDate\"]` (from actual name attribute in HTML)\n" +
+            "   ✅ CORRECT: Use `.inputElement__BlDZa` (from actual class attribute in HTML)\n" +
+            "3. Click date input field: click({selector: '#departureDate'}) ✅ (using actual selector from HTML)\n" +
+            "4. getContent() → NOW see calendar popup with date elements visible in HTML\n" +
+            "5. Find date 'Jan 2 2026' in calendar HTML and click it: click({selector: 'button[data-date=\"2026-01-02\"]'}) ✅\n" +
+            "   OR if date not easily selectable: visionAnalyze({question: 'Where is January 2, 2026 in the calendar?'}) → clickAtCoordinates\n" +
+            "\n**Key Principle:** Date calendar popups are hidden until the date input field is clicked. Always:\n" +
+            "- Step 1: Find and click the date input field to trigger the calendar popup\n" +
+            "- Step 2: getContent() to see the now-visible calendar popup\n" +
+            "- Step 3: Select the desired date from the calendar\n" +
+            "\n❌ FORBIDDEN: Trying to find calendar popup without clicking date input field first - it won't be visible!\n" +
+            "❌ FORBIDDEN: Using visionAnalyze to find calendar before clicking date input - calendar doesn't exist yet!\n" +
+            "✅ CORRECT: Click date input field → getContent() → Select date from calendar\n" +
+            "\n## Tool Selection Strategy:\n" +
+            "**You decide which tool to use based on the situation:**\n" +
+            "- **Labeled form elements?** → getContent() + CSS selectors (fastest, most reliable)\n" +
+            "- **Visual/spatial elements?** → visionAnalyze + clickAtCoordinates (when CSS not practical)\n" +
+            "- **Text-based matching needed?** → getContent() and find CSS class/id, NOT pseudo-selectors\n" +
+            "\n**Examples:**\n" +
+            "- 'Search for flights LAX to LAS' → Analyze page, find search form, fill each field using CSS selectors\n" +
+            "- 'Click the icon below search bar' → visionAnalyze for spatial location + clickAtCoordinates\n" +
+            "- 'Select cheapest option' → Analyze results, identify price elements, find cheapest, click using CSS\n" +
+            "\n## VERIFICATION INSTRUCTIONS:\n" +
+            "When asked to **verify** something is **displayed** (e.g., 'verify icon is displayed', 'verify text is visible'):\n" +
+            "1. If verifying **visual elements** (icons, images, spatial layouts): Use visionAnalyze ONLY - do NOT use assert\n" +
+            "2. If verifying **text content WITH POSITION/LOCATION** (e.g., 'top right', 'top left', 'bottom', 'center', 'upper right', 'lower left'): Use visionAnalyze to verify BOTH text existence AND position - do NOT use assert\n" +
+            "3. If verifying **text content WITHOUT position** (just existence): Use assert with text parameter (e.g., assert({text: 'Products'}))\n" +
+            "4. NEVER try to assert visibility of icons/images using CSS selectors - they may not be visible in DOM\n" +
+            "\n**CRITICAL: Position-based verification requires visionAnalyze:**\n" +
+            "- The assert tool ONLY checks if text exists anywhere on the page - it does NOT verify position\n" +
+            "- If the instruction mentions a position (top right, top left, bottom, center, upper right, lower left, etc.), you MUST use visionAnalyze\n" +
+            "- visionAnalyze can verify both that the text exists AND where it is located on the page\n" +
+            "- If the text is in the wrong position, visionAnalyze will correctly identify this and the verification should FAIL\n" +
+            "\n**Verification Examples:**\n" +
+            "- 'verify airplane icon is displayed' → visionAnalyze({question: 'Is the airplane icon displayed?'}) ✅\n" +
+            "- 'verify Products text is displayed' → assert({text: 'Products'}) ✅ (no position mentioned)\n" +
+            "- 'verify Products text is displayed on top right' → visionAnalyze({question: 'Is the text \"Products\" displayed in the top right area of the page?'}) ✅ (position mentioned - MUST use visionAnalyze)\n" +
+            "- 'verify Products text is displayed on top left' → visionAnalyze({question: 'Is the text \"Products\" displayed in the top left area of the page?'}) ✅ (position mentioned - MUST use visionAnalyze)\n" +
+            "- 'verify button is visible' → assert({selector: 'button.submit-btn'}) ✅ (if it's an interactive element, no position)\n" +
+            "\n## CRITICAL: VERIFYING ITEM PROPERTIES (e.g., 'verify Item X has property Y'):\n" +
+            "When verifying a **property of a specific item** (e.g., 'verify [Item Name] has [property] [value]'):\n" +
+            "\n**WRONG APPROACH (will fail):**\n" +
+            "❌ assert({selector: '.[name-class]', text: '[property-value]'}) ← Looking for property in name element! The property is in a DIFFERENT element.\n" +
+            "❌ '[item-class]:has(.[name-class]:contains('[Item]')) .[property-class]' ← WILL CRASH! :contains() and :has() with text matching are FORBIDDEN!\n" +
+            "❌ Any selector using :contains(), :has-text(), or :has() with text matching ← WILL CRASH!\n" +
+            "\n**CORRECT APPROACH - Follow these steps:**\n" +
+            "1. **Call getContent() FIRST** - This is mandatory to understand the HTML structure\n" +
+            "2. **Identify the item container** - Find the parent element that contains BOTH the item identifier (name) AND its properties (price, etc.)\n" +
+            "   - Look for patterns in ACTUAL HTML: `<div class=\"[item-class]\">`, `<div class=\"[product-class]\">`, `<tr>`, `<li class=\"[row-class]\">`, etc.\n" +
+            "   - The container should wrap both the name element AND the property element\n" +
+            "   - Extract actual class names from getContent() HTML\n" +
+            "3. **Identify the property element selector from ACTUAL HTML** - Find the class/id/attribute of the property element\n" +
+            "   - Look in getContent() for: class=\"[price-class]\", class=\"[property-class]\", [data-testid=\"...\"]\n" +
+            "   - Extract actual selectors like: `.[actual-property-class]`, `.price`, `[data-testid=\"price\"]`\n" +
+            "4. **Construct a structural CSS selector** that targets the property element WITHIN the item container\n" +
+            "   - Pattern: `[item-container-selector] [property-element-selector]`\n" +
+            "   - Generic examples: `div.[item-class] .[property-class]`, `div.[product-class] > .[price-class]`, `tr .[price-class]`\n" +
+            "   - CRITICAL: Use the ACTUAL selectors from getContent() HTML, NOT these generic examples!\n" +
+            "5. **Handle multiple items** - If there are multiple items and you need a specific one:\n" +
+            "   a. Look in getContent() for unique identifiers (data attributes, IDs, unique classes) on the item container\n" +
+            "   b. If found, use: `[item-container][unique-identifier] [property-element]`\n" +
+            "   c. If no unique identifier, you may need to:\n" +
+            "      - Use structural navigation (nth-child, first-child, etc.) if items are in a predictable order\n" +
+            "        Generic pattern: `[item-container]:nth-child(N) [property-element]` where N is the position\n" +
+            "      - Use visionAnalyze to locate the specific item visually, then find its property\n" +
+            "        Pattern: visionAnalyze({question: 'Where is the [property] for [item name]?'}) → get coordinates → find property element\n" +
+            "      - Verify by checking if the property value exists in any item (if the instruction allows)\n" +
+            "   d. **NEVER use :contains() or :has() with text matching** - these pseudo-selectors are NOT supported and will cause errors!\n" +
+            "6. **Assert the property value** - Use assert with the ACTUAL property selector from getContent() and the expected property value\n" +
+            "   - Pattern for any item: assert({selector: '[item-container] [property-element]', text: '[expected-value]'})\n" +
+            "   - Pattern for specific position: assert({selector: '[item-container]:nth-child(N) [property-element]', text: '[expected-value]'})\n" +
+            "   - CRITICAL: Replace [item-container], [property-element], and [expected-value] with ACTUAL values from getContent() HTML!\n" +
+            "\n**Example Workflow (THESE ARE PLACEHOLDERS - USE ACTUAL SELECTORS FROM HTML):**\n" +
+            "Instruction: 'verify [Item Name] has price [Price Value]'\n" +
+            "1. getContent() → Examine the ACTUAL HTML structure of the current page\n" +
+            "2. Find the item container element - look for the parent element wrapping each item\n" +
+            "   Example HTML might show: <div class=\"[actual-item-class]\"> <div class=\"[actual-name-class]\">[Item Name]</div> <div class=\"[actual-price-class]\">[Price]</div> </div>\n" +
+            "3. Extract ACTUAL selectors from HTML:\n" +
+            "   - Item container class from HTML (e.g., class=\"product-card\") → `div.product-card`\n" +
+            "   - Property element class from HTML (e.g., class=\"product-price\") → `.product-price`\n" +
+            "4. Check if there's a unique identifier for the specific item in getContent()\n" +
+            "5. If no unique identifier, choose appropriate approach:\n" +
+            "   - Option A: If checking ANY item with that price: Use `div.[actual-item-class] .[actual-price-class]`\n" +
+            "   - Option B: If items are in order and you know position: Use `div.[actual-item-class]:nth-child(N) .[actual-price-class]`\n" +
+            "   - Option C: Use visionAnalyze to locate the specific item visually\n" +
+            "6. assert({selector: '[ACTUAL-selector-from-HTML]', text: '[expected-price-value]'})\n" +
+            "\n**CRITICAL REMINDERS:**\n" +
+            "- ALL selectors MUST come from the ACTUAL HTML seen in getContent() - NEVER use hardcoded/example selectors\n" +
+            "- getContent() is MANDATORY before constructing any selector\n" +
+            "- Look for class=\"...\", id=\"...\", data-*=\"...\" attributes in the actual HTML\n" +
+            "- Different websites have different HTML structures - adapt to each site's actual structure\n" +
+            "\n**CRITICAL REMINDER:**\n" +
+            "- NEVER use :contains('text') - it will cause errors\n" +
+            "- NEVER use :has(.element:contains('text')) - it will cause errors\n" +
+            "- ALWAYS use standard CSS selectors from getContent() or use visionAnalyze + clickAtCoordinates\n" +
+            "\n**Key Principle:** When verifying 'Item X has property Y', you must:\n" +
+            "- Find the PROPERTY element (price), NOT the identifier element (name)\n" +
+            "- Use structural CSS selectors to navigate from item container to property element\n" +
+            "- The selector should target: `[item-container] [property-element]`, not `[identifier-element]`\n" +
+            "- NEVER use pseudo-selectors like :contains() or :has() with text matching\n" +
+            "\n## CRITICAL: COUNTING ELEMENTS (e.g., 'verify there are 10 products'):\n" +
+            "When asked to verify a SPECIFIC NUMBER of elements (e.g., 'verify there are 10 products', 'verify exactly 5 items', 'check that 3 results are shown'):\n" +
+            "\n**CRITICAL UNDERSTANDING:**\n" +
+            "- The assert tool ONLY checks if an element EXISTS - it does NOT count how many elements match\n" +
+            "- To count elements, you MUST use getContent() to see the HTML and manually count the occurrences\n" +
+            "- After getting the HTML, count how many times the element appears and compare to the expected count\n" +
+            "- If the counts don't match, the verification should FAIL\n" +
+            "\n**WRONG APPROACH (will pass when it should fail):**\n" +
+            "❌ getContent() → See 6 matching elements → Use assert({selector: '[some-selector]'}) → It passes (element exists!) but SHOULD FAIL if expected count is different!\n" +
+            "❌ Using assert() without actually counting - assert only checks existence, not count\n" +
+            "\n**CORRECT APPROACH - Follow these steps:**\n" +
+            "1. **Call getContent() FIRST** - This is mandatory to see the HTML structure\n" +
+            "2. **Identify the element selector from ACTUAL HTML** - Find the class/id of the elements to count\n" +
+            "   - Look in getContent() HTML for: class=\"...\", id=\"...\", data-*=\"...\"\n" +
+            "   - Example: If HTML shows <div class=\"product-card\">, use `div.product-card`\n" +
+            "   - CRITICAL: Use ACTUAL selectors from the HTML, not generic/example selectors!\n" +
+            "3. **Count the occurrences in the HTML** - Manually count how many times the element appears in the getContent() result\n" +
+            "   - Look for the opening tag of the element (e.g., `<div class=\"[actual-class]\">`) and count occurrences\n" +
+            "   - Be careful to count only the correct elements, not nested or similar elements\n" +
+            "4. **Compare the actual count to the expected count**\n" +
+            "   - If actual count == expected count → Verification PASSES\n" +
+            "   - If actual count != expected count → Verification FAILS - state clearly: 'Expected X elements but found Y elements'\n" +
+            "5. **Report the result clearly**\n" +
+            "   - Success: 'Verified there are X [items] shown (found X elements matching [actual-selector-from-HTML])'\n" +
+            "   - Failure: 'Expected X [items] but found only Y [items] (counted Y elements matching [actual-selector-from-HTML])'\n" +
+            "\n**Example Workflow (use ACTUAL selectors from your HTML):**\n" +
+            "Instruction: 'verify there are a total of 10 products shown on the page'\n" +
+            "1. getContent() → Examine the ACTUAL HTML to see how products are structured\n" +
+            "   Example HTML might show: <div class=\"product-item\">...</div> appearing multiple times\n" +
+            "2. Extract ACTUAL selector from HTML: class=\"product-item\" → Use `div.product-item`\n" +
+            "3. Count occurrences: Search for `<div class=\"product-item\">` in the HTML → Count how many times it appears (e.g., 6 times)\n" +
+            "4. Compare: Expected 10, Found 6 → **FAIL**\n" +
+            "5. Report: 'Expected 10 products but found only 6 products on the page (counted 6 elements matching div.product-item from actual HTML)'\n" +
+            "\n**Example where verification passes:**\n" +
+            "1. getContent() → HTML shows <div class=\"item\"> appearing multiple times\n" +
+            "2. Count occurrences: Search for `<div class=\"item\">` → Find 10 occurrences\n" +
+            "3. Compare: Expected 10, Found 10 → **PASS**\n" +
+            "4. Report: 'Verified there are 10 products shown on the page (found 10 elements matching div.item from actual HTML)'\n" +
+            "\n**CRITICAL REMINDERS:**\n" +
+            "- ALWAYS call getContent() first to see the ACTUAL HTML structure\n" +
+            "- Extract selectors from the ACTUAL HTML (look for class=\"...\", id=\"...\", etc.)\n" +
+            "- NEVER use hardcoded/example selectors - every website has different HTML structure\n" +
+            "- COUNT the elements in the HTML manually and compare to expected count\n" +
+            "- FAIL the verification if actual count ≠ expected count\n" +
+            "\n**Key Principle:** Counting requires analyzing the HTML from getContent() and manually counting elements. The assert tool is NOT sufficient for count verification.\n" +
+            "- ALWAYS use getContent() to see the HTML\n" +
+            "- COUNT the occurrences of the element in the HTML\n" +
+            "- COMPARE actual count to expected count\n" +
+            "- FAIL the verification if counts don't match\n" +
+            "- DO NOT use assert() alone for counting - it only checks existence, not count\n" +
+            "\n" +
+            "Remember: You are AUTONOMOUS. Break down complex tasks, choose the right tools, and adapt as needed. " +
+            "Be precise and complete the task step by step. Once the task is done, stop and confirm completion. " +
+            "Screenshots are captured automatically - you don't need to call screenshot()."
+        ));
+        
+        // Add page context if available
+        if (pageContext != null && !pageContext.isEmpty()) {
+            messages.add(SimpleMessage.system("Current page context: " + pageContext));
+        }
+        
+        // Add variables context if available
+        if (!variables.isEmpty()) {
+            StringBuilder varsContext = new StringBuilder("Available variables for substitution:\n");
+            for (Map.Entry<String, Object> entry : variables.entrySet()) {
+                varsContext.append("- ").append(entry.getKey()).append(" = ").append(entry.getValue()).append("\n");
+            }
+            messages.add(SimpleMessage.system(varsContext.toString()));
+        }
+        
+        // User instruction (with variables already substituted)
+        messages.add(SimpleMessage.user(substitutedInstruction));
+        
+        // Execute with loop for tool calls
+        int iteration = 0;
+        int selectorErrorRetryCount = 0; // Track selector validation errors to prevent infinite loops
+        final int MAX_SELECTOR_ERROR_RETRIES = 3; // Max retries for selector validation errors
+        List<ToolExecutionLog> executionLog = new ArrayList<>();
+        
+        while (iteration < maxIterations) {
+            iteration++;
+            log.debug("Agent iteration {}/{}", iteration, maxIterations);
+            
+            // Call LLM with tools
+            LlmProvider.AgentResponse response = provider.executeWithTools(messages, tools, 1);
+            
+            // Check if task is complete
+            if (response.isComplete()) {
+                log.info("Agent task complete after {} iterations", iteration);
+                Map<String, Object> extractedVars = extractVariablesFromResponse(response.getContent());
+                return AgentExecutionResult.success(response.getContent(), executionLog, extractedVars);
+            }
+            
+            // Execute tool calls
+            if (!response.getToolCalls().isEmpty()) {
+                for (LlmProvider.ToolCall toolCall : response.getToolCalls()) {
+                    log.info("Agent calling tool: {}", toolCall.getName());
+                    
+                    // Execute via MCP - returns ToolExecutionResult with message and optional screenshotUrl
+                    McpToolExecutor.ToolExecutionResult toolResult = mcpToolExecutor.executeTool(toolCall);
+                    
+                    // Log execution
+                    String screenshotUrl = toolResult.getScreenshotUrl();
+                    if (screenshotUrl != null) {
+                        log.info("Tool {} returned screenshot URL: {}", toolCall.getName(), screenshotUrl);
+                    } else {
+                        log.debug("Tool {} did not return a screenshot URL", toolCall.getName());
+                    }
+                    
+                    ToolExecutionLog logEntry = new ToolExecutionLog(
+                        toolCall.getName(),
+                        toolCall.getArguments(),
+                        toolResult.getMessage(),
+                        screenshotUrl
+                    );
+                    executionLog.add(logEntry);
+                    log.debug("Added tool execution log entry with screenshotUrl: {}", logEntry.getScreenshotUrl());
+                    
+                    // If tool execution failed, check if it's a selector validation error
+                    if (!toolResult.isSuccess()) {
+                        // If it's a selector validation error, provide feedback to agent for retry
+                        if (toolResult.isSelectorValidationError()) {
+                            selectorErrorRetryCount++;
+                            
+                            // Prevent infinite retry loops
+                            if (selectorErrorRetryCount > MAX_SELECTOR_ERROR_RETRIES) {
+                                log.error("Too many selector validation errors ({}). Failing step.", selectorErrorRetryCount);
+                                return AgentExecutionResult.error(
+                                    "Tool execution failed after " + selectorErrorRetryCount + " selector validation errors. " +
+                                    "The agent repeatedly generated invalid selectors. Last error: " + toolResult.getMessage(),
+                                    executionLog
+                                );
+                            }
+                            
+                            log.warn("Selector validation error detected (retry {}/{}): {} - {}", 
+                                selectorErrorRetryCount, MAX_SELECTOR_ERROR_RETRIES, toolCall.getName(), toolResult.getMessage());
+                            
+                            // Build detailed feedback message for the agent
+                            String feedbackMessage = buildSelectorErrorFeedback(
+                                toolResult.getMessage(),
+                                toolResult.getOriginalSelector(),
+                                toolCall.getName()
+                            );
+                            
+                            // Add the feedback as a tool result message so agent can see it and retry
+                            Map<String, Object> metadata = new HashMap<>();
+                            metadata.put("function_name", toolCall.getName());
+                            metadata.put("error_type", "selector_validation");
+                            metadata.put("retry_count", selectorErrorRetryCount);
+                            
+                            messages.add(SimpleMessage.builder()
+                                .role("tool")
+                                .content(feedbackMessage)
+                                .toolCallId(toolCall.getId())
+                                .metadata(metadata)
+                                .build());
+                            
+                            // Continue to next iteration - agent will see the error and retry
+                            continue;
+                        } else {
+                            // For other errors, fail immediately
+                            log.error("Tool execution failed: {} - {}", toolCall.getName(), toolResult.getMessage());
+                            return AgentExecutionResult.error(
+                                "Tool execution failed: " + toolResult.getMessage(), 
+                                executionLog
+                            );
+                        }
+                    }
+                    
+                    // Reset selector error counter on successful tool execution
+                    selectorErrorRetryCount = 0;
+                    
+                    // Add tool result to conversation (just the message for LLM context)
+                    Map<String, Object> metadata = new HashMap<>();
+                    metadata.put("function_name", toolCall.getName());
+                    
+                    // Truncate large tool responses to avoid token overflow
+                    String toolContent = toolResult.getMessage();
+                    if (toolContent != null && toolContent.length() > 10000) {
+                        toolContent = toolContent.substring(0, 10000) + 
+                            "\n\n[Content truncated - original length: " + toolResult.getMessage().length() + " chars]";
+                        log.info("Truncated tool response from {} chars to {} chars", 
+                            toolResult.getMessage().length(), toolContent.length());
+                    }
+                    
+                    messages.add(SimpleMessage.builder()
+                        .role("tool")
+                        .content(toolContent)
+                        .toolCallId(toolCall.getId())
+                        .metadata(metadata)
+                        .build());
+                }
+                
+                // Keep only recent messages to avoid token limit
+                // Keep system messages + last 8 messages (4 request-response pairs)
+                pruneConversationHistory(messages);
+                
+            } else {
+                // No tool calls but not complete - shouldn't happen
+                log.warn("Agent returned no tool calls and not complete");
+                Map<String, Object> extractedVars = extractVariablesFromResponse(response.getContent());
+                return AgentExecutionResult.success(response.getContent(), executionLog, extractedVars);
+            }
+        }
+        
+        // Max iterations reached
+        log.warn("Agent reached max iterations ({})", maxIterations);
+        return AgentExecutionResult.error("Maximum iterations reached", executionLog);
+    }
+    
+    private LlmProvider getProvider(String name) {
+        LlmProvider provider = providers.get(name);
+        if (provider == null) {
+            throw new IllegalArgumentException("Unknown LLM provider: " + name);
+        }
+        return provider;
+    }
+    
+    /**
+     * Prune conversation history to keep only recent messages
+     * Keeps system messages and last N conversation messages to avoid token limit
+     */
+    private void pruneConversationHistory(List<LlmProvider.Message> messages) {
+        // Keep system messages and last 8 messages (allows for 4 tool call cycles)
+        int maxRecentMessages = 8;
+        
+        if (messages.size() <= maxRecentMessages + 2) { // +2 for system messages
+            return; // No pruning needed
+        }
+        
+        // Separate system messages from conversation
+        List<LlmProvider.Message> systemMessages = new ArrayList<>();
+        List<LlmProvider.Message> conversationMessages = new ArrayList<>();
+        
+        for (LlmProvider.Message msg : messages) {
+            if ("system".equals(msg.getRole())) {
+                systemMessages.add(msg);
+            } else {
+                conversationMessages.add(msg);
+            }
+        }
+        
+        // Keep only last N conversation messages
+        if (conversationMessages.size() > maxRecentMessages) {
+            int removeCount = conversationMessages.size() - maxRecentMessages;
+            log.debug("Pruning {} old messages from conversation history", removeCount);
+            conversationMessages = conversationMessages.subList(removeCount, conversationMessages.size());
+        }
+        
+        // Rebuild messages list
+        messages.clear();
+        messages.addAll(systemMessages);
+        messages.addAll(conversationMessages);
+    }
+    
+    /**
+     * Build detailed feedback message for selector validation errors
+     * This helps the agent understand what went wrong and how to fix it
+     */
+    private String buildSelectorErrorFeedback(String errorMessage, String invalidSelector, String toolName) {
+        StringBuilder feedback = new StringBuilder();
+        feedback.append("❌ SELECTOR VALIDATION ERROR - Please retry with a corrected selector\n\n");
+        feedback.append("Error: ").append(errorMessage).append("\n\n");
+        feedback.append("Invalid selector attempted: '").append(invalidSelector != null ? invalidSelector : "null").append("'\n\n");
+        
+        feedback.append("🔧 HOW TO FIX THIS:\n");
+        feedback.append("1. **Call getContent() FIRST** to see the actual HTML structure of the page\n");
+        feedback.append("2. **Find standard CSS selectors** from the actual HTML:\n");
+        feedback.append("   - Extract class names from HTML: class=\"product-price\" → use '.product-price'\n");
+        feedback.append("   - Extract IDs from HTML: id=\"item-price\" → use '#item-price'\n");
+        feedback.append("   - Use attributes from HTML: '[data-testid=\"price\"]', '[aria-label=\"Price\"]'\n");
+        feedback.append("   - Build structural selectors from actual HTML: '[item-class] .[price-class]'\n");
+        feedback.append("   - Use nth-child if items are in order: '[item-class]:nth-child(3) .[price-class]'\n");
+        feedback.append("   CRITICAL: Replace [item-class], [price-class] with ACTUAL values from getContent() HTML!\n");
+        feedback.append("3. **NEVER use these FORBIDDEN selectors:**\n");
+        feedback.append("   - :contains('text') - NOT supported\n");
+        feedback.append("   - :has-text('text') - NOT supported\n");
+        feedback.append("   - :has(.element:contains('text')) - NOT supported\n");
+        feedback.append("   - Any combination of :contains() or :has() with text matching\n");
+        feedback.append("4. **If you need to find an element by text content:**\n");
+        feedback.append("   - Option A: Use visionAnalyze to locate it visually, then use clickAtCoordinates\n");
+        feedback.append("   - Option B: Use getContent() to find structural relationships, then use standard CSS selectors\n");
+        feedback.append("   - Option C: If items are in a predictable order, use nth-child selectors\n\n");
+        
+        feedback.append("📋 EXAMPLE - Finding price for a specific item:\n");
+        feedback.append("❌ WRONG: Using :contains() or :has() with text matching - FORBIDDEN!\n");
+        feedback.append("✅ CORRECT APPROACH:\n");
+        feedback.append("   1. getContent() → See HTML structure and extract ACTUAL class names\n");
+        feedback.append("   2. If items are in order: '[actual-item-class]:nth-child(2) .[actual-price-class]'\n");
+        feedback.append("   3. OR use visionAnalyze({question: 'Where is the price for [Item Name]?'}) → clickAtCoordinates\n");
+        feedback.append("   4. OR if checking any item: '[actual-item-class] .[actual-price-class]'\n");
+        feedback.append("   CRITICAL: Use ACTUAL class names from getContent(), not these placeholders!\n\n");
+        
+        feedback.append("🔄 ACTION REQUIRED:\n");
+        feedback.append("Please retry the ").append(toolName).append(" tool with a corrected selector.\n");
+        feedback.append("Remember: Use ONLY standard CSS selectors from getContent(), or use visionAnalyze + clickAtCoordinates.\n");
+        
+        return feedback.toString();
+    }
+    
+    /**
+     * Substitute variables in instruction ({{variableName}} -> value)
+     */
+    private String substituteVariables(String instruction, Map<String, Object> variables) {
+        if (variables == null || variables.isEmpty()) {
+            return instruction;
+        }
+        
+        String result = instruction;
+        for (Map.Entry<String, Object> entry : variables.entrySet()) {
+            String varName = entry.getKey();
+            String varValue = entry.getValue() != null ? entry.getValue().toString() : "";
+            String pattern = "\\{\\{" + java.util.regex.Pattern.quote(varName) + "\\}\\}";
+            result = result.replaceAll(pattern, varValue);
+        }
+        return result;
+    }
+    
+    /**
+     * Build variable-related instructions for the system prompt
+     */
+    private String buildVariableInstructions(Map<String, Object> variables) {
+        if (variables == null || variables.isEmpty()) {
+            return "";
+        }
+        
+        return "\n\n## VARIABLE HANDLING:\n" +
+            "You have access to variables that can be used in instructions and extracted from results.\n" +
+            "\n**VARIABLE SUBSTITUTION:**\n" +
+            "- Variables in the format {{variableName}} will be automatically substituted with their values\n" +
+            "- Example: If variable 'orderId' = 'ORD-12345', instruction 'Click {{orderId}}' becomes 'Click ORD-12345'\n" +
+            "\n**VARIABLE EXTRACTION:**\n" +
+            "When the instruction asks you to extract or store a value, you MUST return it in a specific format:\n" +
+            "- If instruction contains phrases like 'store ... in variable X', 'save ... as X', 'extract ... to X':\n" +
+            "  * Extract the value from the page (using getContent() or tool results)\n" +
+            "  * At the end of your response, add a line: \"EXTRACTED_VARIABLE:variableName=value\"\n" +
+            "  * Example: \"EXTRACTED_VARIABLE:orderNumber=ORD-12345\"\n" +
+            "- The extracted value will be available for use in subsequent steps\n" +
+            "\n**Examples:**\n" +
+            "- Instruction: 'Get the order number from the confirmation page and store it in variable orderNumber'\n" +
+            "  * Execute: getContent() → Find order number → Extract value\n" +
+            "  * Response: 'Order number found. EXTRACTED_VARIABLE:orderNumber=ORD-12345'\n" +
+            "- Instruction: 'Click on the link with text {{orderNumber}}'\n" +
+            "  * Variable substitution happens automatically before execution\n" +
+            "  * Execute: Click on link with text 'ORD-12345'\n";
+    }
+    
+    /**
+     * Extract variables from agent response message
+     * Looks for patterns like "EXTRACTED_VARIABLE:name=value"
+     */
+    private Map<String, Object> extractVariablesFromResponse(String response) {
+        Map<String, Object> extracted = new HashMap<>();
+        if (response == null || response.isEmpty()) {
+            return extracted;
+        }
+        
+        // Look for EXTRACTED_VARIABLE patterns
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+            "EXTRACTED_VARIABLE:(\\w+)=([^\\n]+)"
+        );
+        java.util.regex.Matcher matcher = pattern.matcher(response);
+        
+        while (matcher.find()) {
+            String varName = matcher.group(1);
+            String varValue = matcher.group(2).trim();
+            extracted.put(varName, varValue);
+            log.info("Extracted variable: {} = {}", varName, varValue);
+        }
+        
+        return extracted;
+    }
+    
+    /**
+     * Result of agent execution
+     */
+    public static class AgentExecutionResult {
+        private final boolean success;
+        private final String message;
+        private final List<ToolExecutionLog> executionLog;
+        private final Map<String, Object> extractedVariables;
+        
+        private AgentExecutionResult(boolean success, String message, List<ToolExecutionLog> executionLog, Map<String, Object> extractedVariables) {
+            this.success = success;
+            this.message = message;
+            this.executionLog = executionLog;
+            this.extractedVariables = extractedVariables != null ? extractedVariables : new HashMap<>();
+        }
+        
+        public static AgentExecutionResult success(String message, List<ToolExecutionLog> log) {
+            return new AgentExecutionResult(true, message, log, new HashMap<>());
+        }
+        
+        public static AgentExecutionResult success(String message, List<ToolExecutionLog> log, Map<String, Object> extractedVariables) {
+            return new AgentExecutionResult(true, message, log, extractedVariables);
+        }
+        
+        public static AgentExecutionResult error(String message) {
+            return new AgentExecutionResult(false, message, new ArrayList<>(), new HashMap<>());
+        }
+        
+        public static AgentExecutionResult error(String message, List<ToolExecutionLog> log) {
+            return new AgentExecutionResult(false, message, log, new HashMap<>());
+        }
+        
+        public boolean isSuccess() { return success; }
+        public String getMessage() { return message; }
+        public List<ToolExecutionLog> getExecutionLog() { return executionLog; }
+        public Map<String, Object> getExtractedVariables() { return extractedVariables; }
+    }
+    
+    /**
+     * Log of a single tool execution
+     */
+    public static class ToolExecutionLog {
+        private final String toolName;
+        private final Map<String, Object> arguments;
+        private final String result;
+        private final String screenshotUrl;  // URL of automatically captured screenshot
+        
+        public ToolExecutionLog(String toolName, Map<String, Object> arguments, String result, String screenshotUrl) {
+            this.toolName = toolName;
+            this.arguments = arguments;
+            this.result = result;
+            this.screenshotUrl = screenshotUrl;
+        }
+        
+        public String getToolName() { return toolName; }
+        public Map<String, Object> getArguments() { return arguments; }
+        public String getResult() { return result; }
+        public String getScreenshotUrl() { return screenshotUrl; }
+        
+        @Override
+        public String toString() {
+            return String.format("%s(%s) -> %s [screenshot: %s]", toolName, arguments, result, screenshotUrl);
+        }
+    }
+}

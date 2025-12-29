@@ -1,0 +1,412 @@
+package com.youraitester.agent.impl;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.youraitester.agent.LlmProvider;
+import lombok.extern.slf4j.Slf4j;
+import okhttp3.*;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * OpenAI implementation of LlmProvider using raw HTTP requests
+ * This allows us to properly set function parameters schemas
+ */
+@Component("openai")
+@Slf4j
+public class OpenAiProvider implements LlmProvider {
+    
+    private static final String OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+    private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
+    
+    @Value("${openai.api.key:}")
+    private String apiKey;
+    
+    @Value("${openai.model:gpt-4}")
+    private String model;
+    
+    @Value("${openai.timeout:60}")
+    private int timeoutSeconds;
+    
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final OkHttpClient httpClient;
+    
+    public OpenAiProvider() {
+        this.httpClient = new OkHttpClient.Builder()
+            .connectTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .build();
+    }
+    
+    @Override
+    public AgentResponse executeWithTools(List<Message> messages, List<Tool> tools, int maxIterations) {
+        if (!isAvailable()) {
+            throw new IllegalStateException("OpenAI provider is not configured");
+        }
+        
+        log.info("OpenAI: Executing with {} tools, max {} iterations", tools.size(), maxIterations);
+        
+        // Log registered tools with schemas
+        for (Tool tool : tools) {
+            log.debug("OpenAI: Registered function {} with schema: {}", tool.getName(), tool.getParametersSchema());
+        }
+        
+        int iteration = 0;
+        SimpleAgentResponse lastResponse = null;
+        
+        while (iteration < maxIterations) {
+            iteration++;
+            log.debug("OpenAI: Iteration {}/{}", iteration, maxIterations);
+            
+            try {
+                // Build request JSON
+                ObjectNode requestJson = buildRequestJson(messages, tools);
+                String requestBody = objectMapper.writeValueAsString(requestJson);
+                
+                log.debug("OpenAI: Request body: {}", requestBody);
+                
+                // Execute HTTP request
+                Request request = new Request.Builder()
+                    .url(OPENAI_API_URL)
+                    .addHeader("Authorization", "Bearer " + apiKey)
+                    .addHeader("Content-Type", "application/json")
+                    .post(RequestBody.create(requestBody, JSON))
+                    .build();
+                
+                Response response = httpClient.newCall(request).execute();
+                String responseBody = response.body().string();
+                
+                if (!response.isSuccessful()) {
+                    log.error("OpenAI API error: {} - {}", response.code(), responseBody);
+                    throw new RuntimeException("OpenAI API request failed: " + response.code());
+                }
+                
+                log.debug("OpenAI: Response: {}", responseBody);
+                
+                // Parse response
+                JsonNode responseJson = objectMapper.readTree(responseBody);
+                JsonNode choice = responseJson.get("choices").get(0);
+                JsonNode messageNode = choice.get("message");
+                
+                // Check if we have tool calls
+                JsonNode toolCallsNode = messageNode.get("tool_calls");
+                
+                if (toolCallsNode != null && toolCallsNode.isArray() && toolCallsNode.size() > 0) {
+                    JsonNode toolCall = toolCallsNode.get(0);
+                    JsonNode function = toolCall.get("function");
+                    String functionName = function.get("name").asText();
+                    String argumentsJson = function.get("arguments").asText();
+                    
+                    log.debug("OpenAI: Function call requested: {}", functionName);
+                    log.debug("OpenAI: Arguments JSON: {}", argumentsJson);
+                    
+                    // Parse arguments
+                    Map<String, Object> arguments = new HashMap<>();
+                    try {
+                        if (argumentsJson != null && !argumentsJson.isEmpty()) {
+                            arguments = objectMapper.readValue(argumentsJson, Map.class);
+                        }
+                    } catch (Exception e) {
+                        log.error("Failed to parse function arguments", e);
+                    }
+                    
+                    log.debug("OpenAI: Parsed arguments: {}", arguments);
+                    
+                    // Add assistant message to history
+                    messages.add(SimpleMessage.builder()
+                        .role("assistant")
+                        .content(messageNode.has("content") ? messageNode.get("content").asText() : null)
+                        .build());
+                    
+                    SimpleToolCall toolCallObj = SimpleToolCall.builder()
+                        .id(toolCall.get("id").asText())
+                        .name(functionName)
+                        .arguments(arguments)
+                        .build();
+                    
+                    // Return to caller to execute the tool
+                    lastResponse = SimpleAgentResponse.builder()
+                        .content(messageNode.has("content") ? messageNode.get("content").asText() : null)
+                        .toolCalls(List.of(toolCallObj))
+                        .complete(false)
+                        .finishReason("tool_calls")
+                        .build();
+                    
+                    return lastResponse;
+                    
+                } else {
+                    // No tool calls - task complete
+                    String finishReason = choice.get("finish_reason").asText();
+                    String content = messageNode.has("content") ? messageNode.get("content").asText() : "";
+                    
+                    log.debug("OpenAI: Task complete. Finish reason: {}", finishReason);
+                    
+                    lastResponse = SimpleAgentResponse.builder()
+                        .content(content)
+                        .toolCalls(new ArrayList<>())
+                        .complete(true)
+                        .finishReason(finishReason)
+                        .build();
+                    
+                    return lastResponse;
+                }
+                
+            } catch (IOException e) {
+                log.error("OpenAI API request failed", e);
+                throw new RuntimeException("OpenAI API request failed", e);
+            }
+        }
+        
+        // Max iterations reached
+        log.warn("OpenAI: Max iterations ({}) reached", maxIterations);
+        return SimpleAgentResponse.builder()
+            .content("Maximum iterations reached")
+            .complete(true)
+            .finishReason("length")
+            .build();
+    }
+    
+    private ObjectNode buildRequestJson(List<Message> messages, List<Tool> tools) {
+        ObjectNode requestJson = objectMapper.createObjectNode();
+        requestJson.put("model", model);
+        requestJson.put("temperature", 0.0);
+        
+        // Add messages
+        ArrayNode messagesArray = requestJson.putArray("messages");
+        for (Message msg : messages) {
+            ObjectNode messageNode = messagesArray.addObject();
+            messageNode.put("role", msg.getRole());
+            if (msg.getContent() != null) {
+                messageNode.put("content", msg.getContent());
+            }
+            
+            // Handle tool result messages
+            if ("tool".equals(msg.getRole())) {
+                messageNode.put("tool_call_id", (String) msg.getMetadata().get("tool_call_id"));
+            }
+        }
+        
+        // Add tools with proper schemas
+        if (!tools.isEmpty()) {
+            ArrayNode toolsArray = requestJson.putArray("tools");
+            for (Tool tool : tools) {
+                ObjectNode toolNode = toolsArray.addObject();
+                toolNode.put("type", "function");
+                
+                ObjectNode functionNode = toolNode.putObject("function");
+                functionNode.put("name", tool.getName());
+                functionNode.put("description", tool.getDescription());
+                
+                // Add parameters schema
+                Map<String, Object> schema = tool.getParametersSchema();
+                if (schema != null && !schema.isEmpty()) {
+                    try {
+                        String schemaJson = objectMapper.writeValueAsString(schema);
+                        JsonNode schemaNode = objectMapper.readTree(schemaJson);
+                        functionNode.set("parameters", schemaNode);
+                    } catch (Exception e) {
+                        log.error("Failed to convert parameters schema for tool {}", tool.getName(), e);
+                    }
+                }
+            }
+        }
+        
+        return requestJson;
+    }
+    
+    @Override
+    public String getProviderName() {
+        return "openai";
+    }
+    
+    @Override
+    public boolean isAvailable() {
+        return apiKey != null && !apiKey.isEmpty() && !apiKey.equals("your-api-key-here");
+    }
+}
+        
+        while (iteration < maxIterations) {
+            iteration++;
+            log.debug("OpenAI: Iteration {}/{}", iteration, maxIterations);
+            
+            // Build request
+            ChatCompletionRequest.ChatCompletionRequestBuilder requestBuilder = ChatCompletionRequest.builder()
+                .model(model)
+                .messages(chatMessages)
+                .temperature(0.0);
+            
+            if (!functions.isEmpty()) {
+                requestBuilder.functions(functions);
+            }
+            
+            // Execute request
+            ChatCompletionResult result = service.createChatCompletion(requestBuilder.build());
+            ChatCompletionChoice choice = result.getChoices().get(0);
+            ChatMessage responseMessage = choice.getMessage();
+            
+            // Check if we have function calls
+            ChatFunctionCall functionCall = responseMessage.getFunctionCall();
+            
+            if (functionCall != null) {
+                log.debug("OpenAI: Function call requested: {}", functionCall.getName());
+                
+                // Add assistant message with function call
+                chatMessages.add(responseMessage);
+                
+                // Convert to our format
+                Map<String, Object> arguments = new HashMap<>();
+                try {
+                    Object args = functionCall.getArguments();
+                    log.debug("OpenAI: Raw arguments type: {}, value: {}", 
+                        args != null ? args.getClass().getName() : "null", args);
+                    
+                    if (args == null) {
+                        // No arguments
+                        log.warn("OpenAI: Function {} called with null arguments", functionCall.getName());
+                        arguments = new HashMap<>();
+                    } else if (args instanceof String) {
+                        String argsStr = (String) args;
+                        log.debug("OpenAI: Arguments as string: [{}]", argsStr);
+                        // Check if it's empty or just a description
+                        if (argsStr.isEmpty() || argsStr.startsWith("\"") || !argsStr.contains("{")) {
+                            // It's a string description or empty, use empty map
+                            log.warn("OpenAI: Function {} called with invalid/empty arguments string: [{}]", 
+                                functionCall.getName(), argsStr);
+                            arguments = new HashMap<>();
+                        } else {
+                            // Try to parse as JSON
+                            arguments = objectMapper.readValue(argsStr, Map.class);
+                            log.debug("OpenAI: Parsed arguments: {}", arguments);
+                        }
+                    } else {
+                        // Already an object, convert it
+                        String argsJson = objectMapper.writeValueAsString(args);
+                        arguments = objectMapper.readValue(argsJson, Map.class);
+                        log.debug("OpenAI: Converted arguments: {}", arguments);
+                    }
+                } catch (Exception e) {
+                    log.error("Failed to parse function arguments, using empty map", e);
+                    arguments = new HashMap<>();
+                }
+                
+                SimpleToolCall toolCall = SimpleToolCall.builder()
+                    .id("call_" + iteration)
+                    .name(functionCall.getName())
+                    .arguments(arguments)
+                    .build();
+                
+                // Return to caller to execute the tool
+                lastResponse = SimpleAgentResponse.builder()
+                    .content(responseMessage.getContent())
+                    .toolCalls(List.of(toolCall))
+                    .complete(false)
+                    .finishReason("tool_calls")
+                    .build();
+                
+                return lastResponse;
+                
+            } else {
+                // No function call - task complete
+                log.debug("OpenAI: Task complete. Finish reason: {}", choice.getFinishReason());
+                
+                lastResponse = SimpleAgentResponse.builder()
+                    .content(responseMessage.getContent())
+                    .toolCalls(new ArrayList<>())
+                    .complete(true)
+                    .finishReason(choice.getFinishReason())
+                    .build();
+                
+                return lastResponse;
+            }
+        }
+        
+        // Max iterations reached
+        log.warn("OpenAI: Max iterations ({}) reached", maxIterations);
+        return SimpleAgentResponse.builder()
+            .content("Maximum iterations reached")
+            .complete(true)
+            .finishReason("length")
+            .build();
+    }
+    
+    @Override
+    public String getProviderName() {
+        return "openai";
+    }
+    
+    @Override
+    public boolean isAvailable() {
+        return apiKey != null && !apiKey.isEmpty() && !apiKey.equals("your-api-key-here");
+    }
+    
+    private List<ChatMessage> convertMessages(List<Message> messages) {
+        return messages.stream()
+            .map(msg -> {
+                ChatMessage chatMsg = new ChatMessage();
+                chatMsg.setRole(msg.getRole());
+                chatMsg.setContent(msg.getContent());
+                
+                // Handle function result messages
+                if ("tool".equals(msg.getRole()) || "function".equals(msg.getRole())) {
+                    chatMsg.setRole("function");
+                    chatMsg.setName((String) msg.getMetadata().get("function_name"));
+                }
+                
+                return chatMsg;
+            })
+            .collect(Collectors.toList());
+    }
+    
+    private List<ChatFunction> convertTools(List<Tool> tools) {
+        // The OpenAI library we're using doesn't properly support dynamic function schemas
+        // We'll create functions without schemas and rely on the LLM to infer parameters from descriptions
+        // This is a workaround until we can upgrade to a better library or implement raw HTTP calls
+        List<ChatFunction> functions = new ArrayList<>();
+        for (Tool tool : tools) {
+            // Create detailed description that includes parameter information
+            StringBuilder detailedDescription = new StringBuilder(tool.getDescription());
+            
+            Map<String, Object> schema = tool.getParametersSchema();
+            if (schema.containsKey("properties")) {
+                detailedDescription.append(" Parameters: ");
+                Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
+                List<String> required = (List<String>) schema.getOrDefault("required", new ArrayList<>());
+                
+                for (Map.Entry<String, Object> prop : properties.entrySet()) {
+                    String paramName = prop.getKey();
+                    Map<String, Object> paramDef = (Map<String, Object>) prop.getValue();
+                    String paramDesc = (String) paramDef.get("description");
+                    boolean isRequired = required.contains(paramName);
+                    
+                    detailedDescription.append(paramName)
+                        .append(" (")
+                        .append(paramDef.get("type"))
+                        .append(isRequired ? ", required" : ", optional")
+                        .append("): ")
+                        .append(paramDesc)
+                        .append("; ");
+                }
+            }
+            
+            ChatFunction function = ChatFunction.builder()
+                .name(tool.getName())
+                .description(detailedDescription.toString())
+                .executor(Object.class, (obj) -> "Executed by LLM")
+                .build();
+            
+            log.debug("OpenAI: Registered function {} with description: {}", tool.getName(), detailedDescription.toString());
+            functions.add(function);
+        }
+        return functions;
+    }
+}

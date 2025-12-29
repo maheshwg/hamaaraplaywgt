@@ -1,0 +1,32 @@
+[Unit]
+Description=YourAITester Backend Service
+After=network.target postgresql.service
+Wants=youraitester-mcp.service
+
+[Service]
+Type=simple
+User=youraitester
+Group=youraitester
+WorkingDirectory=/opt/youraitester
+EnvironmentFile=/opt/youraitester/.env
+
+# Start the Spring Boot application
+ExecStart=/usr/bin/java -jar /opt/youraitester/backend.jar \
+    --spring.profiles.active=production \
+    --server.port=8080
+
+# Restart configuration
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/youraitester/backend.log
+StandardError=append:/var/log/youraitester/backend-error.log
+
+# Resource limits
+LimitNOFILE=65536
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+
+

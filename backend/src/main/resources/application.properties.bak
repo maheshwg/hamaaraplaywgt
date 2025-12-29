@@ -1,0 +1,87 @@
+# Spring Boot Configuration
+spring.application.name=test-automation-backend
+
+# Server Configuration
+server.port=8080
+
+# Database Configuration
+spring.datasource.url=jdbc:postgresql://localhost:5432/test_automation
+spring.datasource.username=postgres
+spring.datasource.password=postgres
+spring.datasource.driver-class-name=org.postgresql.Driver
+
+# JPA Configuration
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=false
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
+spring.jpa.properties.hibernate.format_sql=true
+
+# Logging Configuration
+logging.level.org.hibernate.SQL=INFO
+logging.level.org.hibernate.type.descriptor.sql.BasicBinder=INFO
+logging.level.org.hibernate.orm.jdbc.bind=INFO
+
+# File Upload
+spring.servlet.multipart.max-file-size=10MB
+spring.servlet.multipart.max-request-size=10MB
+
+# OpenAI Configuration (for AI step interpretation)
+openai.api.key=${OPENAI_API_KEY:your-api-key-here}
+openai.model=${OPENAI_MODEL:gpt-4o-mini}
+openai.timeout=${OPENAI_TIMEOUT:60}
+
+# Claude (Anthropic) Configuration
+claude.api.key=${CLAUDE_API_KEY:}
+claude.model=${CLAUDE_MODEL:claude-3-5-sonnet-20241022}
+claude.api.url=${CLAUDE_API_URL:https://api.anthropic.com/v1/messages}
+claude.api.version=${CLAUDE_API_VERSION:2023-06-01}
+claude.max.tokens=${CLAUDE_MAX_TOKENS:4096}
+
+# Agent Configuration
+agent.llm.provider=${AGENT_LLM_PROVIDER:openai}
+agent.max.iterations=${AGENT_MAX_ITERATIONS:10}
+
+# MCP (Model Context Protocol) Configuration
+# Set to true to use external MCP server for browser automation
+mcp.playwright.enabled=${MCP_PLAYWRIGHT_ENABLED:false}
+mcp.playwright.server.url=${MCP_PLAYWRIGHT_SERVER_URL:http://localhost:3000}
+
+# Screenshot Storage Configuration
+# Type: "local" for local file system (default), "s3" for AWS S3
+screenshot.storage.type=${SCREENSHOT_STORAGE_TYPE:local}
+
+# Local Screenshot Storage (used when screenshot.storage.type=local)
+screenshot.storage.local.directory=${SCREENSHOT_LOCAL_DIR:./screenshots}
+
+# AWS S3 Configuration (for screenshot storage when screenshot.storage.type=s3)
+aws.s3.bucket-name=${AWS_S3_BUCKET:test-automation-screenshots}
+aws.s3.region=${AWS_REGION:us-east-1}
+aws.access.key=${AWS_ACCESS_KEY:}
+aws.secret.key=${AWS_SECRET_KEY:}
+# Optional: CloudFront distribution URL for faster screenshot delivery
+aws.s3.cloudfront.url=${AWS_CLOUDFRONT_URL:}
+
+# Browser Automation Configuration
+browser.headless=true
+browser.timeout=30000
+browser.max-sessions=5
+
+# Thread Pool Configuration
+spring.task.execution.pool.core-size=5
+spring.task.execution.pool.max-size=10
+spring.task.execution.pool.queue-capacity=100
+
+# Logging
+logging.level.com.youraitester=INFO
+
+# Log file configuration
+logging.file.name=logs/application.log
+logging.file.max-size=10MB
+logging.file.max-history=7
+logging.file.total-size-cap=100MB
+
+# Log pattern for file
+logging.pattern.file=%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n
+
+# Log pattern for console (optional, keeping it cleaner)
+logging.pattern.console=%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n

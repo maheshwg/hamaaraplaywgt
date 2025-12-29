@@ -1,0 +1,20 @@
+{
+  "name": "youraitester-mcp-server",
+  "version": "1.0.0",
+  "description": "Playwright MCP Server with SSE transport for YourAITester",
+  "type": "module",
+  "main": "mcp-server-sse.js",
+  "scripts": {
+    "start": "node mcp-server-sse.js",
+    "install-browsers": "npx playwright install chrome"
+  },
+  "dependencies": {
+    "@playwright/mcp": "latest",
+    "@modelcontextprotocol/sdk": "latest"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
+

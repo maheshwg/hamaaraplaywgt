@@ -1,0 +1,39 @@
+[Unit]
+Description=YourAITester MCP Server (Playwright)
+After=network.target
+
+[Service]
+Type=simple
+User=youraitester
+Group=youraitester
+WorkingDirectory=/opt/youraitester
+EnvironmentFile=/opt/youraitester/.env
+
+# Set Playwright browser path
+Environment="PLAYWRIGHT_BROWSERS_PATH=/home/youraitester/.cache/ms-playwright"
+Environment="USER_DATA_DIR=/opt/youraitester/mcp-data"
+
+# Start MCP server
+ExecStart=/usr/bin/npx -y @playwright/mcp@latest \
+    --port 8931 \
+    --headless \
+    --browser chrome \
+    --shared-browser-context \
+    --user-data-dir /opt/youraitester/mcp-data \
+    --viewport-size 1920x1080 \
+    --timeout-action 30000 \
+    --timeout-navigation 60000
+
+# Restart configuration
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/youraitester/mcp.log
+StandardError=append:/var/log/youraitester/mcp-error.log
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+
+

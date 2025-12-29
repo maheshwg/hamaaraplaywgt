@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  playwright-mcp:
+    build: .
+    container_name: playwright-mcp
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    volumes:
+      - ./screenshots:/app/screenshots
+    cap_add:
+      - SYS_ADMIN
