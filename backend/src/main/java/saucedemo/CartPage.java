@@ -41,14 +41,11 @@ public class CartPage {
          * @return Quantity of the product
          */
         public int getProductQuantity(String productName) {
-            for (int i = 0; i < cartItems.count(); i++) {
-                Locator item = cartItems.nth(i);
-                String name = item.locator(".inventory_item_name").textContent();
-                if (name != null && name.trim().equalsIgnoreCase(productName.trim())) {
-                    String qtyText = item.locator(".cart_quantity").textContent();
-                    return Integer.parseInt(qtyText.trim());
-                }
+            Locator item = cartItems.filter(new Locator.FilterOptions().setHasText(productName)).first();
+            if (item.count() == 0) {
+                throw new IllegalArgumentException("Product not found: " + productName);
             }
-            throw new IllegalArgumentException("Product not found: " + productName);
+            String qtyText = item.locator(".cart_quantity").textContent();
+            return Integer.parseInt(qtyText.trim());
         }
 }

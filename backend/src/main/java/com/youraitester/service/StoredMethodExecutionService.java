@@ -109,116 +109,17 @@ public class StoredMethodExecutionService {
         String body = m.getMethodBody();
 
         try {
-            // 1) Collect locator assignments as we encounter them (but we also need to execute inline actions in order).
-            // We'll scan line-by-line.
             String[] lines = body.split("\\R");
-            for (String rawLine : lines) {
-                String line = rawLine.trim();
-                if (line.isEmpty()) continue;
-                // Handle inline @log directives (so they can reference local variables declared above)
-                if (line.startsWith("//")) {
-                    maybeLogInlineDirective(screen.getName(), m.getMethodName(), line, params, localScalars);
-                    continue;
-                }
-
-                // Track simple local scalar assignments for logging/templates:
-                // String testing = "Testing";
-                Matcher sla = STRING_LITERAL_ASSIGN.matcher(rawLine);
-                if (sla.matches()) {
-                    String var = sla.group(1);
-                    String lit = sla.group(2);
-                    if (var != null && !var.isBlank() && lit != null) {
-                        String v = lit.trim();
-                        if ((v.startsWith("\"") && v.endsWith("\"")) || (v.startsWith("'") && v.endsWith("'"))) {
-                            v = unescapeJavaString(v.substring(1, v.length() - 1));
-                        }
-                        localScalars.put(var, v);
-                    }
-                    continue;
-                }
-
-                // locator assignment
-                Matcher a = LOC_ASSIGN.matcher(rawLine);
-                if (a.matches()) {
-                    String var = a.group(1);
-                    String expr = a.group(2);
-                    localLocators.put(var, expr);
-                    continue;
-                }
-
-                // inline action: page.locator(expr).action(arg?)
-                Matcher ia = INLINE_ACTION.matcher(rawLine);
-                if (ia.matches()) {
-                    String expr = ia.group(1);
-                    String action = ia.group(2);
-                    String argExpr = ia.group(3);
-                    String selector = evalStringExpr(expr, params);
-                    execAction(action, selector, evalArg(action, argExpr, params));
-                    continue;
-                }
-
-            // page.selectOption(selector, new SelectOption().setLabel/setValue(...))
-            Matcher ps = PAGE_SELECT_OPTION.matcher(rawLine);
-            if (ps.matches()) {
-                String selectorExpr = ps.group(1);
-                String optionExpr = ps.group(2);
-                String selector = evalStringExpr(selectorExpr, params);
-                SelectChoice choice = parseSelectChoice(optionExpr, params);
-                execSelectChoice(selector, choice);
-                continue;
-            }
-
-                // var action: x.action(arg?)
-                Matcher va = VAR_ACTION.matcher(rawLine);
-                if (va.matches()) {
-                    String var = va.group(1);
-                    String action = va.group(2);
-                    String argExpr = va.group(3);
-
-                    String selector = null;
-
-                    // local locator var
-                    if (localLocators.containsKey(var)) {
-                        selector = evalStringExpr(localLocators.get(var), params);
-                    } else {
-                        // field locator (from Screen.elements)
-                        ScreenElement el = findElement(screen, var);
-                        if (el != null) selector = el.getSelector();
-                    }
-
-                    if (selector == null || selector.isBlank()) {
-                        // If click()/fill() is called on something we don't understand, fail fast (prevents silent no-op).
-                        throw new RuntimeException("Unsupported locator reference '" + var + "' in stored method '" + methodName + "'");
-                    }
-
-                // Special handling for selectOption(new SelectOption().setLabel/setValue(...))
-                if ("selectOption".equalsIgnoreCase(action)) {
-                    SelectChoice choice = parseSelectChoice(argExpr, params);
-                    execSelectChoice(selector, choice);
-                } else {
-                    execAction(action, selector, evalArg(action, argExpr, params));
-                }
-                    continue;
-                }
-
-                // Not supported: ignore braces and declarations, but fail on unknown playwright actions to avoid false success.
-                String lc = line.toLowerCase(Locale.ROOT);
-                if (lc.equals("{") || lc.equals("}") || lc.startsWith("public ") || lc.startsWith("private ") || lc.startsWith("protected ")) {
-                    continue;
-                }
-                if (lc.contains("page.") || lc.contains(".locator(") || lc.contains(".fill(") || lc.contains(".click(") || lc.contains(".selectoption(")) {
-                    throw new RuntimeException("Unsupported statement in stored method '" + methodName + "': " + line);
-                }
-
-                // Support boolean returns of the form: return someLocator.isVisible();
-                // This is common in page objects and lets us use return value to fail the step.
-                if (lc.startsWith("return ") && lc.endsWith(";")) {
-                    Boolean b = tryEvalReturnBoolean(rawLine, screen, localLocators, params);
-                    if (b != null) {
-                        returnBoolean = b;
-                    }
-                }
-            }
+            returnBoolean = processLines(
+                lines,
+                0,
+                lines.length,
+                screen,
+                methodName,
+                params,
+                localLocators,
+                localScalars
+            );
         } catch (Exception ex) {
             // If the method defines a user-facing failure message, prefer that over internal errors.
             if (!(ex instanceof UserFacingStepException) && directives.onFailure != null && !directives.onFailure.isBlank()) {
@@ -231,6 +132,321 @@ public class StoredMethodExecutionService {
             return StoredMethodResult.booleanResult(returnBoolean, directives.onSuccess, directives.onFailure, extracted, booleanReturnExpected);
         }
         return StoredMethodResult.noReturn(directives.onSuccess, directives.onFailure, extracted, booleanReturnExpected);
+    }
+
+    /**
+     * Execute a subset of Java-ish page-object statements line-by-line, including safe if/else blocks.
+     * Returns a boolean value if a supported "return <locator>.isVisible();" statement is encountered.
+     */
+    private Boolean processLines(String[] lines,
+                                 int startInclusive,
+                                 int endExclusive,
+                                 Screen screen,
+                                 String methodName,
+                                 Map<String, String> params,
+                                 Map<String, String> localLocators,
+                                 Map<String, String> localScalars) {
+        Boolean returnBoolean = null;
+        int i = startInclusive;
+        while (i < endExclusive) {
+            String rawLine = lines[i];
+            String line = rawLine.trim();
+            if (line.isEmpty()) { i++; continue; }
+
+            // Handle inline @log directives (so they can reference local variables declared above)
+            if (line.startsWith("//")) {
+                maybeLogInlineDirective(screen.getName(), methodName, line, params, localScalars);
+                i++;
+                continue;
+            }
+
+            // if/else (safe subset)
+            if (line.startsWith("if ") || line.startsWith("if(")) {
+                IfBlock b = parseIfElseBlock(lines, i);
+                boolean cond = evalIfCondition(b.condition, screen, localLocators, params);
+                int chosenStart = cond ? b.thenStart : b.elseStart;
+                int chosenEnd = cond ? b.thenEnd : b.elseEnd;
+                if (chosenStart >= 0 && chosenEnd >= 0 && chosenEnd >= chosenStart) {
+                    Boolean rb = processLines(lines, chosenStart, chosenEnd, screen, methodName, params, localLocators, localScalars);
+                    if (rb != null) returnBoolean = rb;
+                }
+                i = b.nextIndex;
+                continue;
+            }
+
+            // Track simple local scalar assignments for logging/templates:
+            // String testing = "Testing";
+            Matcher sla = STRING_LITERAL_ASSIGN.matcher(rawLine);
+            if (sla.matches()) {
+                String var = sla.group(1);
+                String lit = sla.group(2);
+                if (var != null && !var.isBlank() && lit != null) {
+                    String v = lit.trim();
+                    if ((v.startsWith("\"") && v.endsWith("\"")) || (v.startsWith("'") && v.endsWith("'"))) {
+                        v = unescapeJavaString(v.substring(1, v.length() - 1));
+                    }
+                    localScalars.put(var, v);
+                }
+                i++;
+                continue;
+            }
+
+            // locator assignment
+            Matcher a = LOC_ASSIGN.matcher(rawLine);
+            if (a.matches()) {
+                String var = a.group(1);
+                String expr = a.group(2);
+                localLocators.put(var, expr);
+                i++;
+                continue;
+            }
+
+            // inline action: page.locator(expr).action(arg?)
+            Matcher ia = INLINE_ACTION.matcher(rawLine);
+            if (ia.matches()) {
+                String expr = ia.group(1);
+                String action = ia.group(2);
+                String argExpr = ia.group(3);
+                String selector = evalStringExpr(expr, params);
+                execAction(action, selector, evalArg(action, argExpr, params));
+                i++;
+                continue;
+            }
+
+            // page.selectOption(selector, new SelectOption().setLabel/setValue(...))
+            Matcher ps = PAGE_SELECT_OPTION.matcher(rawLine);
+            if (ps.matches()) {
+                String selectorExpr = ps.group(1);
+                String optionExpr = ps.group(2);
+                String selector = evalStringExpr(selectorExpr, params);
+                SelectChoice choice = parseSelectChoice(optionExpr, params);
+                execSelectChoice(selector, choice);
+                i++;
+                continue;
+            }
+
+            // var action: x.action(arg?)
+            Matcher va = VAR_ACTION.matcher(rawLine);
+            if (va.matches()) {
+                String var = va.group(1);
+                String action = va.group(2);
+                String argExpr = va.group(3);
+
+                String selector = null;
+
+                // local locator var
+                if (localLocators.containsKey(var)) {
+                    selector = evalStringExpr(localLocators.get(var), params);
+                } else {
+                    // field locator (from Screen.elements)
+                    ScreenElement el = findElement(screen, var);
+                    if (el != null) selector = el.getSelector();
+                }
+
+                if (selector == null || selector.isBlank()) {
+                    throw new RuntimeException("Unsupported locator reference '" + var + "' in stored method '" + methodName + "'");
+                }
+
+                // Special handling for selectOption(new SelectOption().setLabel/setValue(...))
+                if ("selectOption".equalsIgnoreCase(action)) {
+                    SelectChoice choice = parseSelectChoice(argExpr, params);
+                    execSelectChoice(selector, choice);
+                } else {
+                    execAction(action, selector, evalArg(action, argExpr, params));
+                }
+                i++;
+                continue;
+            }
+
+            // Ignore braces and declarations
+            String lc = line.toLowerCase(Locale.ROOT);
+            if (lc.equals("{") || lc.equals("}") || lc.startsWith("public ") || lc.startsWith("private ") || lc.startsWith("protected ")) {
+                i++;
+                continue;
+            }
+
+            // Support boolean returns of the form: return someLocator.isVisible();
+            if (lc.startsWith("return ") && lc.endsWith(";")) {
+                Boolean b = tryEvalReturnBoolean(rawLine, screen, localLocators, params);
+                if (b != null) returnBoolean = b;
+                i++;
+                continue;
+            }
+
+            // Fail on unknown playwright-ish statements to avoid silent no-op.
+            if (lc.contains("page.") || lc.contains(".locator(") || lc.contains(".fill(") || lc.contains(".click(") || lc.contains(".selectoption(")) {
+                throw new RuntimeException("Unsupported statement in stored method '" + methodName + "': " + line);
+            }
+
+            // Otherwise ignore (declarations/locals we don't care about)
+            i++;
+        }
+        return returnBoolean;
+    }
+
+    private static class IfBlock {
+        final String condition;
+        final int thenStart;
+        final int thenEnd;
+        final int elseStart;
+        final int elseEnd;
+        final int nextIndex;
+        IfBlock(String condition, int thenStart, int thenEnd, int elseStart, int elseEnd, int nextIndex) {
+            this.condition = condition;
+            this.thenStart = thenStart;
+            this.thenEnd = thenEnd;
+            this.elseStart = elseStart;
+            this.elseEnd = elseEnd;
+            this.nextIndex = nextIndex;
+        }
+    }
+
+    /**
+     * Parses:
+     *   if (<cond>) { ... } [else { ... }]
+     *
+     * Supported condition subset is enforced by evalIfCondition(...).
+     */
+    private IfBlock parseIfElseBlock(String[] lines, int ifHeaderIdx) {
+        String header = lines[ifHeaderIdx].trim();
+        Matcher mh = Pattern.compile("^if\\s*\\((.*)\\)\\s*(\\{\\s*)?$").matcher(header);
+        if (!mh.find()) {
+            throw new RuntimeException("Unsupported if header: " + header);
+        }
+        String cond = mh.group(1) != null ? mh.group(1).trim() : "";
+
+        int braceLineIdx = ifHeaderIdx;
+        if (!header.contains("{")) {
+            braceLineIdx = nextNonEmpty(lines, ifHeaderIdx + 1);
+            if (braceLineIdx < 0 || !lines[braceLineIdx].trim().startsWith("{")) {
+                throw new RuntimeException("if must use braces: " + header);
+            }
+        }
+
+        int thenStart = braceLineIdx + 1;
+        int thenCloseIdx = findMatchingBraceLine(lines, braceLineIdx);
+        int thenEnd = thenCloseIdx; // exclusive
+
+        int afterThen = nextNonEmpty(lines, thenCloseIdx + 1);
+        int elseStart = -1, elseEnd = -1;
+        int nextIdx = afterThen >= 0 ? afterThen : (thenCloseIdx + 1);
+
+        if (afterThen >= 0) {
+            String maybeElse = lines[afterThen].trim();
+            if (maybeElse.startsWith("else")) {
+                int elseBraceLineIdx = afterThen;
+                if (!maybeElse.contains("{")) {
+                    elseBraceLineIdx = nextNonEmpty(lines, afterThen + 1);
+                    if (elseBraceLineIdx < 0 || !lines[elseBraceLineIdx].trim().startsWith("{")) {
+                        throw new RuntimeException("else must use braces: " + maybeElse);
+                    }
+                }
+                elseStart = elseBraceLineIdx + 1;
+                int elseCloseIdx = findMatchingBraceLine(lines, elseBraceLineIdx);
+                elseEnd = elseCloseIdx; // exclusive
+                nextIdx = nextNonEmpty(lines, elseCloseIdx + 1);
+                if (nextIdx < 0) nextIdx = elseCloseIdx + 1;
+            }
+        }
+
+        return new IfBlock(cond, thenStart, thenEnd, elseStart, elseEnd, nextIdx);
+    }
+
+    private int nextNonEmpty(String[] lines, int start) {
+        for (int i = start; i < lines.length; i++) {
+            String t = lines[i] != null ? lines[i].trim() : "";
+            if (t.isEmpty()) continue;
+            return i;
+        }
+        return -1;
+    }
+
+    /**
+     * Finds the line index containing the matching '}' for a block that starts at a line containing '{'.
+     * Uses a simple brace counter that ignores braces inside string literals.
+     */
+    private int findMatchingBraceLine(String[] lines, int openBraceLineIdx) {
+        int depth = 0;
+        for (int i = openBraceLineIdx; i < lines.length; i++) {
+            String raw = lines[i] != null ? lines[i] : "";
+            depth += braceDelta(raw);
+            if (i == openBraceLineIdx && depth == 0) depth = 1; // defensive
+            if (i > openBraceLineIdx && depth == 0) return i;
+        }
+        throw new RuntimeException("Unclosed brace block starting at line " + openBraceLineIdx);
+    }
+
+    private int braceDelta(String s) {
+        if (s == null) return 0;
+        boolean inD = false;
+        boolean inS = false;
+        boolean esc = false;
+        int delta = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (inD) {
+                if (!esc && c == '\\') { esc = true; continue; }
+                if (!esc && c == '"') inD = false;
+                esc = false;
+                continue;
+            }
+            if (inS) {
+                if (!esc && c == '\\') { esc = true; continue; }
+                if (!esc && c == '\'') inS = false;
+                esc = false;
+                continue;
+            }
+            if (c == '"') { inD = true; continue; }
+            if (c == '\'') { inS = true; continue; }
+            if (c == '{') delta++;
+            else if (c == '}') delta--;
+        }
+        return delta;
+    }
+
+    /**
+     * Very limited condition support for safety:
+     * - <var>.isVisible()
+     * - page.locator(<stringExpr>).isVisible()
+     * - prefix '!' negation
+     */
+    private boolean evalIfCondition(String cond,
+                                    Screen screen,
+                                    Map<String, String> localLocators,
+                                    Map<String, String> params) {
+        if (cond == null) throw new RuntimeException("if condition is empty");
+        String c = cond.trim();
+        if (c.isEmpty()) throw new RuntimeException("if condition is empty");
+        if (c.startsWith("!")) {
+            return !evalIfCondition(c.substring(1).trim(), screen, localLocators, params);
+        }
+
+        // page.locator(expr).isVisible()
+        Matcher pl = Pattern.compile("^page\\.locator\\((.+)\\)\\.isVisible\\(\\)\\s*$").matcher(c);
+        if (pl.find()) {
+            String expr = pl.group(1);
+            String selector = evalStringExpr(expr, params);
+            return playwrightJavaService.isVisible(selector);
+        }
+
+        // var.isVisible()
+        Matcher vl = Pattern.compile("^([a-zA-Z_$][a-zA-Z0-9_$]*)\\.isVisible\\(\\)\\s*$").matcher(c);
+        if (vl.find()) {
+            String var = vl.group(1);
+            String selector = null;
+            if (localLocators != null && localLocators.containsKey(var)) {
+                selector = evalStringExpr(localLocators.get(var), params);
+            } else {
+                ScreenElement el = findElement(screen, var);
+                if (el != null) selector = el.getSelector();
+            }
+            if (selector == null || selector.isBlank()) {
+                throw new RuntimeException("Unsupported if locator reference: " + var);
+            }
+            return playwrightJavaService.isVisible(selector);
+        }
+
+        throw new RuntimeException("Unsupported if condition: " + cond);
     }
 
     public List<String> parseArgsFromStepValue(String value) {
