@@ -43,6 +43,37 @@ public class AppAdminController {
         return ResponseEntity.ok(appRepository.findAll());
     }
 
+    /**
+     * SUPER_ADMIN: create a new app.
+     * Body: { "name": "myapp", "info": "optional (<=4000 chars)" }
+     */
+    @PostMapping
+    public ResponseEntity<?> createApp(@RequestBody Map<String, String> body) {
+        String name = body != null ? body.get("name") : null;
+        String info = body != null ? body.get("info") : null;
+
+        if (name == null || name.trim().isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "bad_request", "message", "name is required"));
+        }
+        name = name.trim();
+        if (name.length() > 200) {
+            return ResponseEntity.badRequest().body(Map.of("error", "bad_request", "message", "name must be <= 200 characters"));
+        }
+        if (info != null && info.length() > 4000) {
+            return ResponseEntity.badRequest().body(Map.of("error", "bad_request", "message", "info must be <= 4000 characters"));
+        }
+
+        if (appRepository.findByNameIgnoreCase(name).isPresent()) {
+            return ResponseEntity.status(409).body(Map.of("error", "conflict", "message", "App already exists with name: " + name));
+        }
+
+        App app = new App();
+        app.setName(name);
+        app.setInfo(info);
+        App saved = appRepository.save(app);
+        return ResponseEntity.ok(saved);
+    }
+
     @GetMapping("/{appId}")
     public ResponseEntity<App> getApp(@PathVariable Long appId) {
         return appRepository.findById(appId)

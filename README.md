@@ -12,6 +12,47 @@ YourAITester combines React frontend with Spring Boot backend to provide:
 - **Batch Execution**: Run multiple tests in parallel or sequentially
 - **Comprehensive Reporting**: Test history, results, and metrics dashboard
 
+## What’s implemented (current direction)
+
+This repo supports **two execution modes**:
+
+- **Deterministic execution (preferred, token-minimized)**:
+  - Tests are mapped at **save-time** into deterministic commands stored on each `TestStep` (`type/selector/value`).
+  - Execution uses **Playwright Java** directly (`PlaywrightJavaService`) and stored app/screen metadata from the DB (no reflection).
+  - If a save was interrupted and mappings are missing, the runner can do a **one-time catch-up mapping** at run start and persist it.
+  - Deterministic variable substitution uses **`{{varName}}`** (back-compat: `${varName}` is still accepted for older saved data).
+  - Step reports store clean pass/fail messages; internal errors are kept in logs.
+
+- **AI execution (legacy / used for some flows)**:
+  - Uses an LLM agent to interpret and execute steps (MCP tools / snapshots).
+  - Variable substitution uses **`{{varName}}`** in the agent path.
+
+### Stored “App / Screen registry” (SUPER_ADMIN)
+
+Apps and screens are stored in the DB with:
+- **`App.info`**: application summary (up to 4000 chars)
+- **`Screen.elements`**: element name + selector metadata
+- **`Screen.methods`**: method metadata + stored `methodBody` (executed via a safe interpreter)
+
+SUPER_ADMIN UI pages exist to manage apps and screens (including elements + methods).
+
+### Stored screen method execution (safe subset)
+
+`ScreenMethod.methodBody` is not compiled Java. It’s interpreted as a **safe subset** and executed via Playwright Java.
+
+Supported directives inside method bodies:
+- **`// @onSuccess: ...`**, **`// @onFailure: ...`**: user-facing step messages
+- **`// @log: ...`**: logs readable messages (supports `{{param}}`, back-compat `${param}`)
+- **`// @export: key=paramName`**: writes values into step “Extracted Variables” (and into run variables)
+
+### Locator/method import from Java sources
+
+SUPER_ADMIN endpoints can import:
+- `Screen.elements` from `page.locator("...")` assignments
+- `Screen.methods` (signature + body) from `public ... { ... }` methods
+
+See `backend/README-locator-import.md` and `backend/scripts/import-locators-testautomationpractice-homepage.sh`.
+
 ## Architecture
 
 ```
@@ -80,7 +121,7 @@ npm install
 npm run dev
 ```
 
-Frontend runs on `http://localhost:5174` (default Vite port)
+Frontend runs on `http://localhost:5173` or `http://localhost:5174` depending on your Vite config.
 
 ## Building for Production
 

@@ -1,0 +1,18 @@
+# Sample manifest for backend/scripts/import-locators-testautomationpractice-homepage.sh
+#
+# Format: one import per line:
+#   <screenName>=<sourcePath>
+#
+# Notes:
+# - sourcePath must be under backend/src/main/java (relative paths are resolved from backend/)
+# - blank lines and lines starting with '#' are ignored
+#
+# Example (testautomationpractice)
+cartpage=src/main/java/saucedemo/cartpage.java
+checkout=src/main/java/saucedemo/CheckoutPage.java
+checkoutoverview=src/main/java/saucedemo/CheckoutOverview.java
+
+# Example (saucedemo)
+# products=src/main/java/saucedemo/Products.java
+# login=src/main/java/saucedemo/LoginPage.java
+

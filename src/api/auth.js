@@ -10,6 +10,13 @@ export const Auth = {
     // Store token timestamp for expiration checking
     localStorage.setItem('tokenTimestamp', Date.now().toString());
   },
+
+  // Sliding session: bump timestamp on activity / authenticated API calls
+  touch() {
+    const token = this.getToken();
+    if (!token) return;
+    localStorage.setItem('tokenTimestamp', Date.now().toString());
+  },
   
   clearToken() {
     localStorage.removeItem('jwtToken');

@@ -133,11 +133,18 @@ public class TestController {
             existing.setAppType(test.getAppType());
         }
 
-        // Save-time mapping: populate selector/value/type so execution can run without LLM
-        try {
-            testStepMappingService.mapTestSteps(existing);
-        } catch (Exception e) {
-            log.warn("Save-time step mapping failed for updateTest id={} (continuing without mappings). {}", id, e.getMessage());
+        // Save-time mapping: populate selector/value/type so execution can run without LLM.
+        // IMPORTANT: Only run mapping when the caller is actually updating steps.
+        // Many codepaths (e.g. updating run_count/last_run_status during execution) call updateTest without steps,
+        // and we must NOT spend LLM tokens in those cases.
+        if (test.getSteps() != null) {
+            try {
+                testStepMappingService.mapTestSteps(existing);
+            } catch (Exception e) {
+                log.warn("Save-time step mapping failed for updateTest id={} (continuing without mappings). {}", id, e.getMessage());
+            }
+        } else {
+            log.debug("Skipping save-time step mapping for updateTest id={} because steps were not provided", id);
         }
         
         log.info("Saving test update. Datasets size: {}", existing.getDatasets() != null ? existing.getDatasets().size() : 0);

@@ -27,9 +27,23 @@ public class ScreenInferenceService {
     @Value("${agent.llm.provider:openai}")
     private String providerName;
 
+    /**
+     * IMPORTANT: We generally do NOT want to call an LLM during test execution.
+     * Default is false so "Run test" stays deterministic and token-free.
+     * If you explicitly want LLM-based screen inference, set:
+     *   screen.inference.llm.enabled=true
+     */
+    @Value("${screen.inference.llm.enabled:false}")
+    private boolean llmEnabled;
+
     public String inferScreenName(String appSummary, List<String> candidateScreenNames, List<String> executedSteps, String lastKnownScreen) {
         if (candidateScreenNames == null || candidateScreenNames.isEmpty()) {
             throw new IllegalArgumentException("candidateScreenNames is empty");
+        }
+
+        // Default: deterministic inference (no LLM calls during run)
+        if (!llmEnabled) {
+            return fallback(candidateScreenNames, lastKnownScreen);
         }
 
         // If LLM provider isn't available (no API key in env), fall back to deterministic heuristics.

@@ -171,7 +171,7 @@ function PagesContent() {
                 <Route path="/AdminScreenEditor" element={<RequireAuth requiredRole="SUPER_ADMIN"><AdminScreenEditor /></RequireAuth>} />
                 <Route path="/AdminTeam" element={<RequireAuth requiredRole="CLIENT_ADMIN"><Team /></RequireAuth>} />
                 <Route path="/AdminBilling" element={<RequireAuth requiredRole="CLIENT_ADMIN"><Billing /></RequireAuth>} />
-                <Route path="/AdminProjects" element={<RequireAuth requiredRole="CLIENT_ADMIN"><Projects /></RequireAuth>} />
+                <Route path="/AdminProjects" element={<RequireAuth allowedRoles={["CLIENT_ADMIN", "SUPER_ADMIN"]}><Projects /></RequireAuth>} />
             </Routes>
         </Layout>
     );

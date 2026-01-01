@@ -12,6 +12,7 @@ import { Trash2, FolderPlus, Users, UserPlus, Eye, Edit, Folder } from 'lucide-r
 const API_BASE = '/api';
 
 export default function Projects() {
+  const isSuperAdmin = Auth.getRole() === 'SUPER_ADMIN';
   const [projects, setProjects] = useState([]);
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -32,7 +33,7 @@ export default function Projects() {
   const loadProjects = async () => {
     setError('');
     try {
-      const res = await fetch(`${API_BASE}/client-admin/projects`, {
+      const res = await fetch(isSuperAdmin ? `${API_BASE}/admin/projects` : `${API_BASE}/client-admin/projects`, {
         headers: { Authorization: `Bearer ${Auth.getToken()}` }
       });
       if (!res.ok) throw new Error(`Failed to load projects (${res.status})`);
@@ -44,6 +45,7 @@ export default function Projects() {
   };
 
   const loadUsers = async () => {
+    if (isSuperAdmin) return; // super admin: read-only view
     try {
       const res = await fetch(`${API_BASE}/client-admin/users`, {
         headers: { Authorization: `Bearer ${Auth.getToken()}` }
@@ -57,6 +59,7 @@ export default function Projects() {
   };
 
   const loadProjectMembers = async (projectId) => {
+    if (isSuperAdmin) return;
     try {
       const res = await fetch(`${API_BASE}/client-admin/projects/${projectId}/access`, {
         headers: { Authorization: `Bearer ${Auth.getToken()}` }
@@ -75,6 +78,7 @@ export default function Projects() {
   }, []);
 
   const createProject = async () => {
+    if (isSuperAdmin) return;
     setLoading(true);
     setError('');
     try {
@@ -99,6 +103,7 @@ export default function Projects() {
   };
 
   const deleteProject = async (projectId) => {
+    if (isSuperAdmin) return;
     if (!confirm('Are you sure you want to delete this project?')) return;
     
     setError('');
@@ -120,6 +125,7 @@ export default function Projects() {
   };
 
   const assignUserToProject = async () => {
+    if (isSuperAdmin) return;
     if (!selectedProject || !assignmentData.userId) return;
     
     setError('');
@@ -146,6 +152,7 @@ export default function Projects() {
   };
 
   const removeUserFromProject = async (membershipId) => {
+    if (isSuperAdmin) return;
     if (!confirm('Remove this user from the project?')) return;
     
     try {
@@ -172,7 +179,9 @@ export default function Projects() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-3xl font-bold">Project Management</h2>
-          <p className="text-slate-600 mt-1">Manage projects and user access</p>
+          <p className="text-slate-600 mt-1">
+            {isSuperAdmin ? 'Super Admin: view all projects across all clients.' : 'Manage projects and user access'}
+          </p>
         </div>
       </div>
 
@@ -182,7 +191,8 @@ export default function Projects() {
         </div>
       )}
 
-      {/* Create Project Card */}
+      {/* Create Project Card (client admin only) */}
+      {!isSuperAdmin && (
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -221,6 +231,7 @@ export default function Projects() {
           </Button>
         </CardContent>
       </Card>
+      )}
 
       {/* Projects List */}
       <Card>

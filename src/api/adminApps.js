@@ -5,6 +5,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? 'h
 
 function authHeaders() {
   const token = Auth.getToken();
+  if (token) Auth.touch();
   return {
     'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {})
@@ -14,6 +15,19 @@ function authHeaders() {
 export async function listAdminApps() {
   const res = await fetch(`${API_BASE}/api/admin/apps`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`Failed to load apps (${res.status})`);
+  return res.json();
+}
+
+export async function createAdminApp({ name, info }) {
+  const res = await fetch(`${API_BASE}/api/admin/apps`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ name, info })
+  });
+  if (!res.ok) {
+    let text = await res.text();
+    throw new Error(`Failed to create app (${res.status}): ${text}`);
+  }
   return res.json();
 }
 

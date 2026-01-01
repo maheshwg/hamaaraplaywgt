@@ -36,6 +36,7 @@ import StepResult from '@/components/results/StepResult';
 export default function TestEditor() {
   const urlParams = new URLSearchParams(window.location.search);
   const testId = urlParams.get('id');
+  const showMapped = urlParams.get('showMapped') === '1' || urlParams.get('mapped') === '1';
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -183,58 +184,16 @@ export default function TestEditor() {
 
   const runMutation = useMutation({
     mutationFn: async () => {
-      // Get the selected project ID from localStorage
-      const selectedProjectId = localStorage.getItem('selectedProjectId');
-      
-      if (!selectedProjectId) {
-        throw new Error('No project selected. Please select a project from the dropdown.');
+      // IMPORTANT: Do NOT auto-save on Run.
+      // Runs should execute the last saved version on the server.
+      if (!testId) {
+        throw new Error('Please save the test before running it.');
       }
-      
-      // Transform dataset/dataset_columns to datasets format before saving
-      const dataToSave = { 
-        ...formData,
-        projectId: selectedProjectId // Add projectId to the test
-      };
-      if (dataToSave.dataset && dataToSave.dataset.length > 0 && dataToSave.dataset_columns && dataToSave.dataset_columns.length > 0) {
-        const datasetJson = JSON.stringify({
-          dataset_columns: dataToSave.dataset_columns,
-          dataset: dataToSave.dataset
-        });
-        dataToSave.datasets = [{
-          name: 'Default Dataset',
-          data: datasetJson
-        }];
-      } else {
-        dataToSave.datasets = [];
-      }
-      delete dataToSave.dataset;
-      delete dataToSave.dataset_columns;
-      
-      // Clean up frontend-only fields from steps
-      dataToSave.steps = dataToSave.steps?.map(({ id, display_type, ...step }) => step) || [];
-      
-      // Ensure the test is saved on the backend first
-      let savedTest;
-      if (testId) {
-        // Update existing test
-        await base44.entities.Test.update(testId, dataToSave);
-        savedTest = { ...dataToSave, id: testId };
-      } else {
-        savedTest = await base44.entities.Test.create(dataToSave);
-      }
-      
+
       // Use batch execution endpoint for consistency (even for single test)
-      // This creates a Run entity with the test name
-      const result = await base44.batch.execute([savedTest.id], savedTest.name, false);
-
-      // Update test metadata (run count / last run) on the server
-      await base44.entities.Test.update(savedTest.id, {
-        run_count: (savedTest.run_count || 0) + 1,
-        last_run_date: new Date().toISOString(),
-        last_run_status: 'running'
-      });
-
-      return savedTest;
+      // This creates a Run entity with the test name. (Does not save the test.)
+      await base44.batch.execute([testId], formData.name || 'Untitled Test', false);
+      return { id: testId };
     },
     onMutate: () => {
       if (!testId) return;
@@ -325,6 +284,16 @@ export default function TestEditor() {
     if (isRunning || runMutation.isPending) {
       return;
     }
+
+    // Require a saved test before running (we no longer auto-save on Run)
+    if (!testId) {
+      toast({
+        title: "Save required",
+        description: "Please click Save first. Run executes the last saved version of the test.",
+        variant: "destructive",
+      });
+      return;
+    }
     
     // Set running state immediately to prevent duplicate calls
     setIsRunning(true);
@@ -332,7 +301,7 @@ export default function TestEditor() {
     // Show notification only once
     toast({
       title: "Test execution started",
-      description: `Running test: ${formData.name || 'Untitled Test'}`,
+      description: `Running last saved version: ${formData.name || 'Untitled Test'}`,
       duration: 5000, // 5 seconds
       className: "bg-blue-50 border-blue-300",
     });
@@ -554,6 +523,7 @@ export default function TestEditor() {
                     onChange={(steps) => setFormData({ ...formData, steps })}
                     modules={modules}
                     dataColumns={formData.dataset_columns || []}
+                    showMapped={showMapped}
                   />
                 </CardContent>
               </Card>

@@ -85,6 +85,28 @@ curl -X POST \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+## Convenience script (multi-screen)
+
+Script:
+- `backend/scripts/import-locators-testautomationpractice-homepage.sh`
+
+It imports **both elements + methods** and now supports multi-import in one run:
+
+```bash
+backend/scripts/import-locators-testautomationpractice-homepage.sh \
+  --app testautomationpractice \
+  --import homepage=src/main/java/testautomationpractice/HomePage.java \
+  --import checkout=src/main/java/testautomationpractice/CheckoutPage.java
+```
+
+Or with a manifest file:
+
+```bash
+backend/scripts/import-locators-testautomationpractice-homepage.sh \
+  --app testautomationpractice \
+  --manifest backend/scripts/import-manifest.sample.txt
+```
+
 ## Known limitations
 
 - Only matches `page.locator("...")` assignments that use **double quotes** and end with a semicolon.

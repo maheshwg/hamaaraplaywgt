@@ -51,9 +51,11 @@ public class TestExecutionService {
     private final AiTestExecutionService aiTestExecutionService;
     private final OfficialPlaywrightMcpService mcpService;
     private final PlaywrightJavaService playwrightJavaService;
+    private final StoredMethodExecutionService storedMethodExecutionService;
     private final AppRepository appRepository;
     private final ScreenRepository screenRepository;
     private final ScreenInferenceService screenInferenceService;
+    private final TestStepMappingService testStepMappingService;
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final int LOG_VALUE_MAX_CHARS = 120;
     
@@ -84,6 +86,20 @@ public class TestExecutionService {
         
         // Eagerly load the steps collection to avoid LazyInitializationException
         test.getSteps().size();
+
+        // If a save was interrupted (user navigated away), the DB may not have mapped steps yet.
+        // We allow a one-time "catch-up" mapping at run time ONLY when mappings are missing,
+        // then persist the mappings so future runs are fully deterministic and token-free.
+        if (needsRuntimeMapping(test)) {
+            log.info("[RUN-MAP] Missing deterministic mappings detected. Performing one-time mapping before execution (testId={})", testId);
+            try {
+                testStepMappingService.mapTestSteps(test);
+                testRepository.save(test);
+                log.info("[RUN-MAP] One-time mapping completed and saved (testId={})", testId);
+            } catch (Exception e) {
+                log.warn("[RUN-MAP] One-time mapping failed (continuing without mappings). testId={} err={}", testId, e.getMessage());
+            }
+        }
         // Eagerly load the datasets collection - ElementCollection needs explicit access
         List<TestDataset> datasets = test.getDatasets();
         if (datasets != null) {
@@ -541,13 +557,36 @@ public class TestExecutionService {
             try {
                 // If save-time mapping populated (type/selector/value), execute directly without any LLM.
                 if (isMappedDeterministicStep(step)) {
-                    log.info("[DET-MAP] Executing mapped step. stepOrder={} action='{}' selector='{}' value={}",
+                    // For call_method, step.value may be JSON args or comma-separated legacy; log both raw and parsed args.
+                    if ("call_method".equalsIgnoreCase(step.getType())) {
+                        List<String> args = storedMethodExecutionService.parseArgsFromStepValue(step.getValue());
+                        log.info("[DET-MAP] Executing mapped step. stepOrder={} action='{}' selector='{}' rawValue={} args={}",
+                            step.getOrder(),
+                            step.getType(),
+                            step.getSelector(),
+                            step.getValue() != null ? "\"" + step.getValue() + "\"" : "null",
+                            args);
+                    } else {
+                        log.info("[DET-MAP] Executing mapped step. stepOrder={} action='{}' selector='{}' value={}",
                         step.getOrder(),
                         step.getType(),
                         step.getSelector(),
                         step.getValue() != null ? "\"" + step.getValue() + "\"" : "null");
+                    }
 
-                    executeMappedDeterministicStep(step);
+                    ExecOutcome outcome = executeMappedDeterministicStep(app, step, variables);
+
+                    // User-facing notes for passed steps (keep clean; no internal details)
+                    String successMsg = outcome != null ? outcome.successMessage : null;
+                    sr.setNotes(successMsg != null && !successMsg.isBlank() ? successMsg : buildPassedNotesForMappedStep(step));
+                    if (outcome != null && outcome.extractedVariables != null && !outcome.extractedVariables.isEmpty()) {
+                        sr.setExtractedVariables(outcome.extractedVariables);
+                        // Make extracted variables available to later steps in this run
+                        Map<String, Object> currentVars = testRun.getVariables();
+                        currentVars.putAll(outcome.extractedVariables);
+                        testRun.setVariables(currentVars);
+                        testRunRepository.save(testRun);
+                    }
 
                     // Best-effort screenshot after step
                     try {
@@ -556,7 +595,9 @@ public class TestExecutionService {
                         Path shotPath = dir.resolve("run-" + testRun.getId() + "-step-" + (step.getOrder() != null ? step.getOrder() : "x") + ".png");
                         // Scroll to the acted element (or active element) before screenshot
                         try {
-                            if (step.getSelector() != null && !step.getSelector().isBlank()) {
+                            if ("call_method".equalsIgnoreCase(step.getType())) {
+                                playwrightJavaService.scrollToActiveElement();
+                            } else if (step.getSelector() != null && !step.getSelector().isBlank()) {
                                 playwrightJavaService.scrollIntoView(step.getSelector());
                             } else {
                                 playwrightJavaService.scrollToActiveElement();
@@ -585,12 +626,43 @@ public class TestExecutionService {
                     parsed.elementName,
                     formatValueForLogs(parsed.elementName, parsed.value));
 
+                ScreenElement element = null;
+
+                // Method calls (non-mapped): execute stored method body from Screen.methods.
+                if ("call_method".equals(parsed.action)) {
+                    String methodName = parsed.elementName;
+                    String arg = parsed.value;
+                    Screen screen = screenRepository.findByApp_IdAndName(appId, screenName)
+                        .orElseThrow(() -> new RuntimeException("Screen not found for appId=" + appId + " name=" + screenName));
+                    List<String> args = arg != null ? List.of(arg) : List.of();
+                    StoredMethodExecutionService.StoredMethodResult r = storedMethodExecutionService.execute(screen, methodName, args);
+                    if (r != null && r.getBooleanValue() != null && !r.getBooleanValue()) {
+                        // Keep UI clean; details stay in logs
+                        String fail = r.getFailureMessage();
+                        throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification failed.");
+                    }
+                    if (r != null && r.isBooleanReturnExpected() && r.getBooleanValue() == null) {
+                        String fail = r.getFailureMessage();
+                        throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification returned no result.");
+                    }
+                    if (r != null && r.getSuccessMessage() != null && !r.getSuccessMessage().isBlank()) {
+                        sr.setNotes(r.getSuccessMessage());
+                    }
+                    if (r != null && r.getExtractedVariables() != null && !r.getExtractedVariables().isEmpty()) {
+                        sr.setExtractedVariables(mergeExtracted(sr.getExtractedVariables(), r.getExtractedVariables()));
+                        Map<String, Object> currentVars = testRun.getVariables();
+                        currentVars.putAll(r.getExtractedVariables());
+                        testRun.setVariables(currentVars);
+                        testRunRepository.save(testRun);
+                    }
+                    // screenshot handled below
+                } else {
                 Screen screen = screenRepository.findByApp_IdAndName(appId, screenName)
                     .orElseThrow(() -> new RuntimeException("Screen not found for appId=" + appId + " name=" + screenName));
 
-                ScreenElement element = resolveElement(screen, parsed.elementName);
+                element = resolveElement(screen, parsed.elementName);
                 if (element == null) {
-                    throw new RuntimeException("Element '" + parsed.elementName + "' not found on screen '" + screenName + "'");
+                    throw new UserFacingStepException("Element '" + parsed.elementName + "' not found on screen '" + screenName + "'");
                 }
 
                 log.info("[DET] Resolved elementName='{}' -> selectorType='{}' selector='{}' frameSelector='{}' elementType='{}'",
@@ -603,6 +675,8 @@ public class TestExecutionService {
                 executeParsedAction(element, parsed);
                 log.info("[DET] Executed action='{}' on element='{}' (stepOrder={})",
                     parsed.action, element.getElementName(), step.getOrder());
+                sr.setNotes(buildPassedNotesForParsedStep(parsed, element));
+                }
 
                 // Best-effort screenshot after step
                 try {
@@ -611,7 +685,7 @@ public class TestExecutionService {
                     Path shotPath = dir.resolve("run-" + testRun.getId() + "-step-" + (step.getOrder() != null ? step.getOrder() : "x") + ".png");
                     // Scroll to the acted element (or active element) before screenshot
                     try {
-                        if (element.getSelector() != null && !element.getSelector().isBlank()) {
+                        if (element != null && element.getSelector() != null && !element.getSelector().isBlank()) {
                             playwrightJavaService.scrollIntoView(element.getSelector());
                         } else {
                             playwrightJavaService.scrollToActiveElement();
@@ -624,9 +698,15 @@ public class TestExecutionService {
                 sr.setStatus("passed");
             } catch (Exception e) {
                 sr.setStatus("failed");
-                sr.setErrorMessage(e.getMessage());
+                String userMsg = toUserFacingStepErrorMessage(step, e);
+                sr.setErrorMessage(userMsg);
                 testRun.setStatus("failed");
-                testRun.setErrorMessage(e.getMessage());
+                testRun.setErrorMessage(userMsg);
+                log.error("[DET] Step failed (stepOrder={} instruction='{}'): {}",
+                    step.getOrder(),
+                    step.getInstruction(),
+                    e.getMessage(),
+                    e);
                 stepResultRepository.save(sr);
                 sr.setDuration(System.currentTimeMillis() - stepStart);
                 break;
@@ -653,26 +733,182 @@ public class TestExecutionService {
             || action.equals("click")
             || action.equals("hover")
             || action.equals("select_by_value")
-            || action.equals("press_key");
+            || action.equals("select_by_label")
+            || action.equals("press_key")
+            || action.equals("call_method");
     }
 
-    private void executeMappedDeterministicStep(TestStep step) {
+    private static class ExecOutcome {
+        final String successMessage;
+        final Map<String, Object> extractedVariables;
+        ExecOutcome(String successMessage, Map<String, Object> extractedVariables) {
+            this.successMessage = successMessage;
+            this.extractedVariables = extractedVariables;
+        }
+    }
+
+    private ExecOutcome executeMappedDeterministicStep(App app, TestStep step, Map<String, Object> variables) {
         String action = step.getType().trim().toLowerCase(Locale.ROOT);
         log.info("[DET-MAP] Running mapped step: stepOrder={} action='{}' selector='{}' value={}",
             step.getOrder(),
             action,
             step.getSelector(),
             step.getValue() != null ? "\"" + step.getValue() + "\"" : "null");
+        String successMessage = null;
+        Map<String, Object> extracted = Map.of();
         switch (action) {
-            case "navigate" -> playwrightJavaService.navigate(step.getValue());
-            case "fill" -> playwrightJavaService.fill(step.getSelector(), step.getValue() != null ? step.getValue() : "");
+            case "navigate" -> playwrightJavaService.navigate(resolveTemplate(step.getValue(), variables));
+            case "fill" -> playwrightJavaService.fill(step.getSelector(), resolveTemplate(step.getValue(), variables));
             case "click" -> playwrightJavaService.click(step.getSelector());
             case "hover" -> playwrightJavaService.hover(step.getSelector());
-            case "select_by_value" -> playwrightJavaService.selectByValue(step.getSelector(), step.getValue() != null ? step.getValue() : "");
-            case "press_key" -> playwrightJavaService.press(step.getValue() != null ? step.getValue() : "");
+            case "select_by_value" -> playwrightJavaService.selectByValue(step.getSelector(), resolveTemplate(step.getValue(), variables));
+            case "select_by_label" -> playwrightJavaService.selectByLabel(step.getSelector(), resolveTemplate(step.getValue(), variables));
+            case "press_key" -> playwrightJavaService.press(resolveTemplate(step.getValue(), variables));
+            case "call_method" -> {
+                // selector format: screenName::methodName
+                String sel = step.getSelector();
+                String[] parts = sel != null ? sel.split("::", 2) : new String[0];
+                if (parts.length != 2) throw new RuntimeException("call_method selector must be 'screenName::methodName' but got: " + sel);
+                String screenName = parts[0];
+                String methodName = parts[1];
+
+                Screen screen = screenRepository.findByApp_IdAndName(app.getId(), screenName)
+                    .orElseThrow(() -> new RuntimeException("Screen not found for appId=" + app.getId() + " name=" + screenName));
+
+                List<String> rawArgs = storedMethodExecutionService.parseArgsFromStepValue(step.getValue());
+                List<String> args = new java.util.ArrayList<>();
+                for (String a : rawArgs) args.add(resolveTemplate(a, variables));
+                StoredMethodExecutionService.StoredMethodResult r = storedMethodExecutionService.execute(screen, methodName, args);
+                if (r != null && r.getBooleanValue() != null && !r.getBooleanValue()) {
+                    String fail = r.getFailureMessage();
+                    throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification failed.");
+                }
+                if (r != null && r.isBooleanReturnExpected() && r.getBooleanValue() == null) {
+                    String fail = r.getFailureMessage();
+                    throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification returned no result.");
+                }
+                successMessage = r != null ? r.getSuccessMessage() : null;
+                extracted = (r != null && r.getExtractedVariables() != null) ? r.getExtractedVariables() : Map.of();
+            }
             default -> throw new RuntimeException("Unsupported mapped action: " + action);
         }
         log.info("[DET-MAP] Executed mapped action='{}' (stepOrder={})", action, step.getOrder());
+        return new ExecOutcome(successMessage, extracted);
+    }
+
+    private static Map<String, Object> mergeExtracted(Map<String, Object> a, Map<String, Object> b) {
+        if (a == null || a.isEmpty()) return b != null ? b : Map.of();
+        if (b == null || b.isEmpty()) return a;
+        java.util.LinkedHashMap<String, Object> out = new java.util.LinkedHashMap<>();
+        out.putAll(a);
+        out.putAll(b);
+        return out;
+    }
+
+    /**
+     * Replaces {{varName}} tokens using the current run variables (including dataset vars + extracted vars).
+     * Back-compat: also supports ${varName}.
+     * If a variable is missing, it is replaced with empty string.
+     */
+    private String resolveTemplate(String value, Map<String, Object> variables) {
+        if (value == null) return "";
+        String s = value;
+        // Preferred: {{var}}
+        s = replaceVars(s, java.util.regex.Pattern.compile("\\{\\{([a-zA-Z_][a-zA-Z0-9_]*)\\}\\}"), variables);
+        // Back-compat: ${var}
+        s = replaceVars(s, java.util.regex.Pattern.compile("\\$\\{([a-zA-Z_][a-zA-Z0-9_]*)\\}"), variables);
+        return s;
+    }
+
+    private String replaceVars(String input, java.util.regex.Pattern pattern, Map<String, Object> variables) {
+        if (input == null || input.isEmpty()) return input;
+        java.util.regex.Matcher m = pattern.matcher(input);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            String key = m.group(1);
+            Object v = (variables != null) ? variables.get(key) : null;
+            String rep = v != null ? String.valueOf(v) : "";
+            m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(rep));
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    /**
+     * Returns true if at least one step is missing deterministic mapping fields.
+     * This is used for a one-time "catch-up" mapping during run when a save was interrupted.
+     */
+    private boolean needsRuntimeMapping(Test test) {
+        if (test == null) return false;
+        if (test.getSteps() == null || test.getSteps().isEmpty()) return false;
+        for (TestStep s : test.getSteps()) {
+            if (s == null) continue;
+            // Only consider steps that actually have an instruction (otherwise ignore)
+            String instr = s.getInstruction();
+            if (instr == null || instr.trim().isEmpty()) continue;
+
+            String type = s.getType();
+            if (type == null || type.trim().isEmpty()) return true;
+
+            String action = type.trim().toLowerCase(Locale.ROOT);
+            if ("navigate".equals(action)) {
+                // navigate needs value; if missing, mapping can help
+                if (s.getValue() == null || s.getValue().trim().isEmpty()) return true;
+                continue;
+            }
+
+            // Other deterministic steps need a selector
+            if (s.getSelector() == null || s.getSelector().trim().isEmpty()) return true;
+        }
+        return false;
+    }
+
+    private String buildPassedNotesForMappedStep(TestStep step) {
+        if (step == null) return "Step passed";
+        String action = step.getType() != null ? step.getType().trim().toLowerCase(Locale.ROOT) : "";
+        return switch (action) {
+            case "navigate" -> "Navigated successfully";
+            case "fill" -> "Value entered successfully";
+            case "click" -> "Clicked successfully";
+            case "hover" -> "Hovered successfully";
+            case "select_by_value" -> "Selected value successfully";
+            case "select_by_label" -> "Selected value successfully";
+            case "press_key" -> "Key pressed successfully";
+            case "call_method" -> "Step passed";
+            default -> "Step passed";
+        };
+    }
+
+    private String buildPassedNotesForParsedStep(ParsedStep parsed, ScreenElement element) {
+        if (parsed == null) return "Step passed";
+        String action = parsed.action != null ? parsed.action.trim().toLowerCase(Locale.ROOT) : "";
+        String elementName = element != null && element.getElementName() != null ? element.getElementName() : parsed.elementName;
+        return switch (action) {
+            case "fill" -> "Entered value successfully" + (elementName != null ? (" in '" + elementName + "'") : "");
+            case "click" -> "Clicked successfully" + (elementName != null ? (" on '" + elementName + "'") : "");
+            case "hover" -> "Hovered successfully" + (elementName != null ? (" on '" + elementName + "'") : "");
+            case "select_by_value", "select_by_label", "select" -> "Selected value successfully" + (elementName != null ? (" in '" + elementName + "'") : "");
+            case "press_key", "press" -> "Key pressed successfully";
+            default -> "Step passed";
+        };
+    }
+
+    private String toUserFacingStepErrorMessage(TestStep step, Exception e) {
+        if (e instanceof UserFacingStepException ufe) {
+            return ufe.getUserMessage();
+        }
+        String msg = e != null ? e.getMessage() : null;
+        if (msg == null || msg.isBlank()) return "Step failed.";
+
+        // Keep common deterministic errors concise and user-friendly
+        if (msg.startsWith("Element '") && msg.contains("not found on screen")) return msg;
+        if (msg.startsWith("Unsupported step format:")) return "Unsupported step instruction format.";
+        if (msg.toLowerCase(Locale.ROOT).contains("timeout")) return "Timed out while performing the step.";
+        if (msg.toLowerCase(Locale.ROOT).contains("screen not found")) return "Screen metadata not found for this step.";
+        if (msg.toLowerCase(Locale.ROOT).contains("call_method selector must be")) return "Invalid method reference for this step.";
+
+        // Default: don't leak internal details
+        return "Step failed.";
     }
 
     private void executeParsedAction(ScreenElement el, ParsedStep parsed) throws Exception {
@@ -772,6 +1008,16 @@ public class TestExecutionService {
             // press KEY
             if (lower.startsWith("press ")) {
                 return new ParsedStep("press_key", null, raw.substring(6).trim());
+            }
+
+            // add to cart product named X / add to cart X
+            if (lower.startsWith("add to cart")) {
+                String rest = raw.substring("add to cart".length()).trim();
+                rest = rest.replaceFirst("(?i)^product\\s+named\\s+", "").trim();
+                rest = stripQuotes(rest);
+                if (rest != null && !rest.isBlank()) {
+                    return new ParsedStep("call_method", "addToCart", rest);
+                }
             }
 
             // enter VALUE in ELEMENT

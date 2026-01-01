@@ -1,6 +1,7 @@
 package com.youraitester.service;
 
 import com.microsoft.playwright.*;
+import com.microsoft.playwright.options.SelectOption;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -98,9 +99,29 @@ public class PlaywrightJavaService {
         getPage().locator(cssSelector).first().selectOption(value == null ? "" : value);
     }
 
+    public void selectByLabel(String cssSelector, String label) {
+        ensureStarted();
+        getPage().locator(cssSelector).first().selectOption(new SelectOption().setLabel(label == null ? "" : label));
+    }
+
     public void press(String key) {
         ensureStarted();
         getPage().keyboard().press(key);
+    }
+
+    public boolean isVisible(String cssSelector) {
+        ensureStarted();
+        return getPage().locator(cssSelector).first().isVisible();
+    }
+
+    public java.util.List<String> allTextContents(String cssSelector) {
+        ensureStarted();
+        return getPage().locator(cssSelector).allTextContents();
+    }
+
+    public String textContent(String cssSelector) {
+        ensureStarted();
+        return getPage().locator(cssSelector).first().textContent();
     }
 
     /**

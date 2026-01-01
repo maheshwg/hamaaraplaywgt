@@ -15,6 +15,7 @@ const API_BASE_URL = getApiBaseUrl();
 
 const authHeaders = () => {
   const token = Auth.getToken();
+  if (token) Auth.touch();
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 

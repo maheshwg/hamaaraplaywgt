@@ -97,7 +97,10 @@ public class JavaMethodImportService {
                 continue;
             }
 
-            String fullBlock = content.substring(m.start(), braceEnd + 1);
+            // Include contiguous comment lines immediately above the method (so directives like
+            // // @onFailure: ... are preserved in methodBody).
+            int methodStart = includeLeadingCommentBlock(content, m.start());
+            String fullBlock = content.substring(methodStart, braceEnd + 1);
             String signature = "public " + returnType + " " + methodName + "(" + paramsText + ")";
             if (signature.length() > 4000) signature = signature.substring(0, 4000);
 
@@ -113,6 +116,47 @@ public class JavaMethodImportService {
 
         log.info("[IMPORT] Parsed {} public method(s) from sourcePath={}", out.size(), p);
         return out;
+    }
+
+    /**
+     * If there are contiguous comment lines directly above the method header, include them.
+     * Stops at the first blank line or non-comment line.
+     *
+     * This is intentionally conservative to avoid accidentally pulling in unrelated code.
+     */
+    private int includeLeadingCommentBlock(String s, int methodHeaderStartIdx) {
+        if (s == null || s.isEmpty()) return methodHeaderStartIdx;
+        if (methodHeaderStartIdx <= 0 || methodHeaderStartIdx >= s.length()) return methodHeaderStartIdx;
+
+        // Find the start of the line containing the method header.
+        int start = methodHeaderStartIdx;
+        while (start > 0 && s.charAt(start - 1) != '\n') start--;
+
+        int cursor = start;
+        while (cursor > 0) {
+            int prevLineEnd = cursor - 1;
+            // Skip trailing \r
+            if (prevLineEnd > 0 && s.charAt(prevLineEnd) == '\r') prevLineEnd--;
+
+            int prevLineStart = prevLineEnd;
+            while (prevLineStart > 0 && s.charAt(prevLineStart - 1) != '\n') prevLineStart--;
+
+            String line = s.substring(prevLineStart, cursor).trim();
+            if (line.isEmpty()) break;
+
+            boolean isComment =
+                line.startsWith("//")
+                    || line.startsWith("/*")
+                    || line.startsWith("*")
+                    || line.endsWith("*/");
+
+            if (!isComment) break;
+
+            cursor = prevLineStart;
+            start = prevLineStart;
+        }
+
+        return start;
     }
 
     private List<ScreenMethodParamRequest> parseParams(String paramsText) {

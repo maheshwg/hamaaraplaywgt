@@ -76,6 +76,24 @@ export default function Layout({ children, currentPageName }) {
     }
   }, [isLandingPage]);
 
+  // Sliding session timeout: treat user activity as "session alive"
+  useEffect(() => {
+    if (isLandingPage) return;
+
+    let lastTouch = 0;
+    const TOUCH_THROTTLE_MS = 30_000;
+    const touch = () => {
+      const now = Date.now();
+      if (now - lastTouch < TOUCH_THROTTLE_MS) return;
+      lastTouch = now;
+      Auth.touch();
+    };
+
+    const events = ['mousemove', 'keydown', 'click', 'scroll'];
+    events.forEach((ev) => window.addEventListener(ev, touch, { passive: true }));
+    return () => events.forEach((ev) => window.removeEventListener(ev, touch));
+  }, [isLandingPage]);
+
   const handleLogout = () => {
     Auth.logout();
   };
@@ -299,6 +317,13 @@ export default function Layout({ children, currentPageName }) {
       { name: 'Dashboard', icon: LayoutDashboard, page: 'Dashboard' },
       { name: 'Clients', icon: Building2, page: 'AdminClients' },
       ...(isTrueSuperAdmin ? [{ name: 'Apps', icon: AppWindow, page: 'AdminApps' }] : []),
+      ...(isTrueSuperAdmin ? [
+        { name: 'Tests', icon: FileText, page: 'Tests' },
+        { name: 'Modules', icon: Package, page: 'Modules' },
+        { name: 'Results', icon: Play, page: 'RunResults' },
+        { name: 'Reports', icon: BarChart3, page: 'Reports' },
+        { name: 'Projects', icon: Briefcase, page: 'AdminProjects' },
+      ] : []),
     ];
   } else if (isClientAdmin) {
     // Client Admin: See testing features + admin features
@@ -450,8 +475,8 @@ export default function Layout({ children, currentPageName }) {
             <span className="text-sm font-medium text-slate-900">{Auth.getRole() || 'User'}</span>
           </div>
           <div className="flex items-center gap-4">
-            {/* Only show tenant/project selectors for non-super-admin users */}
-            {!isSuperAdmin && (
+            {/* Show tenant/project selectors for SUPER_ADMIN and non-admin users (they scope data views). */}
+            {(isTrueSuperAdmin || !isSuperAdmin) && (
               <>
                 <TenantSelector />
                 <ProjectSelector />

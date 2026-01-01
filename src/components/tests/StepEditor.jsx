@@ -9,9 +9,10 @@ import { GripVertical, Trash2, Plus, Package, Type } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import { Auth } from '@/api/auth.js';
 
-export default function StepEditor({ steps, onChange, modules = [], dataColumns = [] }) {
+export default function StepEditor({ steps, onChange, modules = [], dataColumns = [], showMapped = false }) {
   const [newStepType, setNewStepType] = useState('action');
   const isSuperAdmin = Auth.getRole() === 'SUPER_ADMIN';
+  const canShowMapped = isSuperAdmin && showMapped;
 
   // Normalize steps to ensure they have required fields
   const normalizedSteps = steps.map((step, index) => {
@@ -157,7 +158,7 @@ export default function StepEditor({ steps, onChange, modules = [], dataColumns 
                                   placeholder="Describe what this step should do in natural language... Use {{variableName}} to reference variables."
                                   className="min-h-[60px] text-sm resize-none font-mono"
                                 />
-                                {isSuperAdmin && (
+                                {canShowMapped && (
                                   <div className="mt-2 rounded-md border bg-slate-50 px-3 py-2 text-xs font-mono text-slate-700">
                                     <div className="text-slate-500 font-sans text-[11px] mb-1">
                                       Mapped step (computed on Save, read-only)

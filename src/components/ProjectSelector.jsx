@@ -18,15 +18,22 @@ export default function ProjectSelector() {
 
   useEffect(() => {
     async function load() {
-      if (!userId) return;
+      // SUPER_ADMIN can load projects without a userId (dev superadmin often uses a synthetic userId).
+      if (!userRole) return;
+      if (userRole !== 'SUPER_ADMIN' && !userId) return;
       
       try {
         let res;
-        // CLIENT_ADMIN and SUPER_ADMIN can see all projects in tenant
-        if (userRole === 'CLIENT_ADMIN' || userRole === 'SUPER_ADMIN') {
-          // Use the client-admin endpoint which shows all projects in their tenant
-          res = await fetch(`/api/client-admin/projects`, { 
-            headers: { Authorization: `Bearer ${Auth.getToken()}` } 
+        Auth.touch();
+        // SUPER_ADMIN can see all projects across all tenants
+        if (userRole === 'SUPER_ADMIN') {
+          res = await fetch(`/api/admin/projects`, {
+            headers: { Authorization: `Bearer ${Auth.getToken()}` }
+          });
+        } else if (userRole === 'CLIENT_ADMIN') {
+          // Client admin sees all projects in their tenant
+          res = await fetch(`/api/client-admin/projects`, {
+            headers: { Authorization: `Bearer ${Auth.getToken()}` }
           });
         } else {
           // Regular users only see projects they have access to
@@ -41,7 +48,17 @@ export default function ProjectSelector() {
         }
         
         const data = await res.json();
-        const projectsList = Array.isArray(data) ? data : [];
+        let projectsList = Array.isArray(data) ? data : [];
+        const unfiltered = projectsList;
+
+        // For SUPER_ADMIN, optionally filter by selected tenant (if chosen)
+        if (userRole === 'SUPER_ADMIN' && tenantId) {
+          projectsList = projectsList.filter(p => String(p.tenantId || p.tenant?.id || '') === String(tenantId));
+          // If tenantId is stale/invalid and filtering yields nothing, fall back to showing all.
+          if (projectsList.length === 0 && unfiltered.length > 0) {
+            projectsList = unfiltered;
+          }
+        }
         setProjects(projectsList);
         
         // If no project is selected but projects are available, select the first one
@@ -74,7 +91,9 @@ export default function ProjectSelector() {
       <select value={projectId} onChange={onChange} className="border rounded px-2 py-1 text-sm">
         <option value="">Select a project</option>
         {projects.map(p => (
-          <option key={p.id} value={p.id}>{p.name}</option>
+          <option key={p.id} value={p.id}>
+            {userRole === 'SUPER_ADMIN' ? `${p.tenantName || p.tenant?.name || 'Tenant'} / ${p.name}` : p.name}
+          </option>
         ))}
       </select>
     </div>

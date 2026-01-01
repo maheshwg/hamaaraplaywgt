@@ -35,6 +35,13 @@ public class StepResult {
     @Column(name = "screenshot_url")
     private String screenshotUrl;
     
+    /**
+     * User-facing message for this step (shown for both passed and failed steps).
+     * Keep this clean and human-readable (no stack traces / internal details).
+     */
+    @Column(columnDefinition = "TEXT")
+    private String notes;
+
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
     

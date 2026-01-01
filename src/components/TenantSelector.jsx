@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Auth } from '@/api/auth.js';
 
 export default function TenantSelector({ onChange }) {
   const [tenants, setTenants] = useState([]);
@@ -9,7 +10,10 @@ export default function TenantSelector({ onChange }) {
   useEffect(() => {
     async function loadTenants() {
       try {
-        const res = await fetch('/api/admin/tenants');
+        Auth.touch();
+        const res = await fetch('/api/admin/tenants', {
+          headers: { Authorization: `Bearer ${Auth.getToken()}` }
+        });
         const data = await res.json();
         setTenants(data || []);
       } catch (e) {
