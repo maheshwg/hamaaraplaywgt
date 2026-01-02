@@ -42,9 +42,6 @@ public class CartPage {
          */
         public int getProductQuantity(String productName) {
             Locator item = cartItems.filter(new Locator.FilterOptions().setHasText(productName)).first();
-            if (item.count() == 0) {
-                throw new IllegalArgumentException("Product not found: " + productName);
-            }
             String qtyText = item.locator(".cart_quantity").textContent();
             return Integer.parseInt(qtyText.trim());
         }

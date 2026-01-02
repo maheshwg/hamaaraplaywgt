@@ -195,7 +195,7 @@ public class AppAdminController {
      * Example:
      * POST /api/admin/apps/by-name/testautomationpractice/screens/homepage/import-elements-from-java?sourcePath=src/main/java/testautomationpractice/HomePage.java
      */
-    @PostMapping("/by-name/{appName}/screens/{screenName}/import-elements-from-java")
+    @PostMapping("/,{appName}/screens/{screenName}/import-elements-from-java")
     @Transactional
     public ResponseEntity<?> importElementsFromHomePageJava(@PathVariable String appName,
                                                             @PathVariable String screenName,

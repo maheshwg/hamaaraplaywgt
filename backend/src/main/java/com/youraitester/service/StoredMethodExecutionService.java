@@ -46,6 +46,26 @@ public class StoredMethodExecutionService {
     private static final Pattern LOC_ASSIGN =
         Pattern.compile("(?m)^[\\t ]*(?:Locator\\s+)?([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=\\s*page\\.locator\\((.+?)\\)\\s*;\\s*$");
 
+    // Locator item = cartItems.filter(new Locator.FilterOptions().setHasText(productName)).first();
+    private static final Pattern LOC_FILTER_HAS_TEXT_FIRST =
+        Pattern.compile("(?m)^[\\t ]*Locator\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=\\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*\\.\\s*filter\\(\\s*new\\s+Locator\\.FilterOptions\\(\\)\\s*\\.\\s*setHasText\\((.+?)\\)\\s*\\)\\s*\\.\\s*first\\(\\)\\s*;\\s*$");
+
+    // Locator item = cartItems.filter(new Locator.FilterOptions().setHasText(productName)).last();
+    private static final Pattern LOC_FILTER_HAS_TEXT_LAST =
+        Pattern.compile("(?m)^[\\t ]*Locator\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=\\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*\\.\\s*filter\\(\\s*new\\s+Locator\\.FilterOptions\\(\\)\\s*\\.\\s*setHasText\\((.+?)\\)\\s*\\)\\s*\\.\\s*last\\(\\)\\s*;\\s*$");
+
+    // Locator item = cartItems.filter(new Locator.FilterOptions().setHasText(productName)).nth(2);
+    private static final Pattern LOC_FILTER_HAS_TEXT_NTH =
+        Pattern.compile("(?m)^[\\t ]*Locator\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=\\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*\\.\\s*filter\\(\\s*new\\s+Locator\\.FilterOptions\\(\\)\\s*\\.\\s*setHasText\\((.+?)\\)\\s*\\)\\s*\\.\\s*nth\\((.+?)\\)\\s*;\\s*$");
+
+    // Locator item = cartItems.last();
+    private static final Pattern LOC_LAST =
+        Pattern.compile("(?m)^[\\t ]*Locator\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=\\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*\\.\\s*last\\(\\)\\s*;\\s*$");
+
+    // Locator item = cartItems.nth(2);
+    private static final Pattern LOC_NTH =
+        Pattern.compile("(?m)^[\\t ]*Locator\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=\\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*\\.\\s*nth\\((.+?)\\)\\s*;\\s*$");
+
     private static final Pattern INLINE_ACTION =
         Pattern.compile("(?m)^[\\t ]*page\\.locator\\((.+?)\\)\\.(fill|click|hover|selectOption|selectByValue)\\((.*?)\\)\\s*;\\s*$");
 
@@ -59,6 +79,18 @@ public class StoredMethodExecutionService {
     // page.selectOption("css", new SelectOption().setLabel("United States"));
     private static final Pattern PAGE_SELECT_OPTION =
         Pattern.compile("(?m)^[\\t ]*page\\.selectOption\\((.+?)\\s*,\\s*(.+)\\)\\s*;\\s*$");
+
+    // String x = page.locator("...").textContent();
+    private static final Pattern TEXTCONTENT_ASSIGN_INLINE =
+        Pattern.compile("(?m)^[\\t ]*String\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=\\s*page\\.locator\\((.+?)\\)\\.textContent\\(\\)\\s*;\\s*$");
+
+    // String x = someLocatorVar.textContent();
+    private static final Pattern TEXTCONTENT_ASSIGN_VAR =
+        Pattern.compile("(?m)^[\\t ]*String\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=\\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\\.textContent\\(\\)\\s*;\\s*$");
+
+    // String x = base.locator("...").textContent();
+    private static final Pattern TEXTCONTENT_ASSIGN_REL =
+        Pattern.compile("(?m)^[\\t ]*String\\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=\\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\\.locator\\((.+?)\\)\\.textContent\\(\\)\\s*;\\s*$");
 
     public StoredMethodResult execute(Screen screen, String methodName, List<String> args) {
         if (screen == null) throw new IllegalArgumentException("screen is required");
@@ -201,6 +233,126 @@ public class StoredMethodExecutionService {
                 continue;
             }
 
+            // Locator x = base.filter(new Locator.FilterOptions().setHasText(arg)).first();
+            Matcher fh = LOC_FILTER_HAS_TEXT_FIRST.matcher(rawLine);
+            if (fh.matches()) {
+                String outVar = fh.group(1);
+                String baseVar = fh.group(2);
+                String hasTextExpr = fh.group(3);
+                String baseSelector = resolveLocatorSelector(screen, methodName, baseVar, localLocators, params);
+                String hasText = evalValueToken(hasTextExpr != null ? hasTextExpr.trim() : "", params);
+                if (hasText == null) hasText = "";
+                // Represent this filtered locator as a Playwright selector using :has-text()
+                // For first(), we don't need an explicit nth; downstream calls already use .first().
+                String selector = baseSelector + ":has-text(\"" + hasText.replace("\"", "\\\"") + "\")";
+                localLocators.put(outVar, "\"" + selector + "\"");
+                i++;
+                continue;
+            }
+
+            // Locator x = base.filter(...).last();
+            Matcher fhl = LOC_FILTER_HAS_TEXT_LAST.matcher(rawLine);
+            if (fhl.matches()) {
+                String outVar = fhl.group(1);
+                String baseVar = fhl.group(2);
+                String hasTextExpr = fhl.group(3);
+                String baseSelector = resolveLocatorSelector(screen, methodName, baseVar, localLocators, params);
+                String hasText = evalValueToken(hasTextExpr != null ? hasTextExpr.trim() : "", params);
+                if (hasText == null) hasText = "";
+                String selector = baseSelector + ":has-text(\"" + hasText.replace("\"", "\\\"") + "\") >> nth=-1";
+                localLocators.put(outVar, "\"" + selector + "\"");
+                i++;
+                continue;
+            }
+
+            // Locator x = base.filter(...).nth(n);
+            Matcher fhn = LOC_FILTER_HAS_TEXT_NTH.matcher(rawLine);
+            if (fhn.matches()) {
+                String outVar = fhn.group(1);
+                String baseVar = fhn.group(2);
+                String hasTextExpr = fhn.group(3);
+                String nthExpr = fhn.group(4);
+                String baseSelector = resolveLocatorSelector(screen, methodName, baseVar, localLocators, params);
+                String hasText = evalValueToken(hasTextExpr != null ? hasTextExpr.trim() : "", params);
+                if (hasText == null) hasText = "";
+                int nth = parseNthIndex(nthExpr, params);
+                String selector = baseSelector + ":has-text(\"" + hasText.replace("\"", "\\\"") + "\") >> nth=" + nth;
+                localLocators.put(outVar, "\"" + selector + "\"");
+                i++;
+                continue;
+            }
+
+            // Locator x = base.last();
+            Matcher ln = LOC_LAST.matcher(rawLine);
+            if (ln.matches()) {
+                String outVar = ln.group(1);
+                String baseVar = ln.group(2);
+                String baseSelector = resolveLocatorSelector(screen, methodName, baseVar, localLocators, params);
+                String selector = baseSelector + " >> nth=-1";
+                localLocators.put(outVar, "\"" + selector + "\"");
+                i++;
+                continue;
+            }
+
+            // Locator x = base.nth(n);
+            Matcher nn = LOC_NTH.matcher(rawLine);
+            if (nn.matches()) {
+                String outVar = nn.group(1);
+                String baseVar = nn.group(2);
+                String nthExpr = nn.group(3);
+                String baseSelector = resolveLocatorSelector(screen, methodName, baseVar, localLocators, params);
+                int nth = parseNthIndex(nthExpr, params);
+                String selector = baseSelector + " >> nth=" + nth;
+                localLocators.put(outVar, "\"" + selector + "\"");
+                i++;
+                continue;
+            }
+
+            // String x = page.locator(expr).textContent();
+            Matcher tci = TEXTCONTENT_ASSIGN_INLINE.matcher(rawLine);
+            if (tci.matches()) {
+                String outVar = tci.group(1);
+                String expr = tci.group(2);
+                String selector = evalStringExpr(expr, params);
+                String txt = playwrightJavaService.textContent(selector);
+                if (outVar != null && !outVar.isBlank()) {
+                    localScalars.put(outVar, txt != null ? txt : "");
+                }
+                i++;
+                continue;
+            }
+
+            // String x = base.textContent();
+            Matcher tcv = TEXTCONTENT_ASSIGN_VAR.matcher(rawLine);
+            if (tcv.matches()) {
+                String outVar = tcv.group(1);
+                String baseVar = tcv.group(2);
+                String baseSelector = resolveLocatorSelector(screen, methodName, baseVar, localLocators, params);
+                String txt = playwrightJavaService.textContent(baseSelector);
+                if (outVar != null && !outVar.isBlank()) {
+                    localScalars.put(outVar, txt != null ? txt : "");
+                }
+                i++;
+                continue;
+            }
+
+            // String x = base.locator(expr).textContent();
+            Matcher tcr = TEXTCONTENT_ASSIGN_REL.matcher(rawLine);
+            if (tcr.matches()) {
+                String outVar = tcr.group(1);
+                String baseVar = tcr.group(2);
+                String childExpr = tcr.group(3);
+                String baseSelector = resolveLocatorSelector(screen, methodName, baseVar, localLocators, params);
+                String childSelector = evalStringExpr(childExpr, params);
+                String combined = combineCss(baseSelector, childSelector);
+                String txt = playwrightJavaService.textContent(combined);
+                if (outVar != null && !outVar.isBlank()) {
+                    localScalars.put(outVar, txt != null ? txt : "");
+                }
+                i++;
+                continue;
+            }
+
             // inline action: page.locator(expr).action(arg?)
             Matcher ia = INLINE_ACTION.matcher(rawLine);
             if (ia.matches()) {
@@ -282,6 +434,55 @@ public class StoredMethodExecutionService {
             i++;
         }
         return returnBoolean;
+    }
+
+    private String resolveLocatorSelector(Screen screen,
+                                         String methodName,
+                                         String var,
+                                         Map<String, String> localLocators,
+                                         Map<String, String> params) {
+        if (var == null || var.isBlank()) {
+            throw new RuntimeException("Unsupported locator reference '' in stored method '" + methodName + "'");
+        }
+        if (localLocators != null && localLocators.containsKey(var)) {
+            return evalStringExpr(localLocators.get(var), params);
+        }
+        ScreenElement el = findElement(screen, var);
+        if (el != null && el.getSelector() != null && !el.getSelector().isBlank()) {
+            return el.getSelector();
+        }
+        throw new RuntimeException("Unsupported locator reference '" + var + "' in stored method '" + methodName + "'");
+    }
+
+    private String combineCss(String baseSelector, String childSelector) {
+        String b = baseSelector != null ? baseSelector.trim() : "";
+        String c = childSelector != null ? childSelector.trim() : "";
+        if (b.isEmpty()) return c;
+        if (c.isEmpty()) return b;
+        // If the base already uses Playwright selector chaining (>>), continue chaining.
+        // This avoids invalid selectors like: ">> nth=0 .child" (missing >>).
+        if (b.contains(">>")) {
+            return b + " >> " + c;
+        }
+        // Default: naive but effective for most CSS patterns: item.locator(".child") => "<item> .child"
+        return b + " " + c;
+    }
+
+    private int parseNthIndex(String nthExpr, Map<String, String> params) {
+        if (nthExpr == null) throw new RuntimeException("nth() requires an index");
+        String t = nthExpr.trim();
+        // allow numeric literal or param identifier that resolves to numeric
+        String v = evalValueToken(t, params);
+        if (v == null) v = t;
+        String digits = v.trim();
+        if (!digits.matches("^-?\\d+$")) {
+            throw new RuntimeException("nth() index must be an integer literal (loops/vars not supported yet). Got: " + nthExpr);
+        }
+        try {
+            return Integer.parseInt(digits);
+        } catch (Exception e) {
+            throw new RuntimeException("nth() index invalid: " + nthExpr);
+        }
     }
 
     private static class IfBlock {

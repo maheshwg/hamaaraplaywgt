@@ -1,3 +1,14 @@
+are we running playwright command using mcp server ?
+
+In the deterministic runner (mapped steps + stored screen methods), we are not using the HTTP MCP server.
+Deterministic execution uses Playwright Java directly via PlaywrightJavaService (page.locator(...).click/fill/selectOption/...).
+The official Playwright MCP (STDIO) is still present as the legacy/AI path tool runner, but deterministic doesn’t depend on it.
+The old custom selector MCP server on port 3000 is currently checked on startup (PlaywrightMcpService logs connection refused) but deterministic execution doesn’t use it.
+So: deterministic = Playwright Java (no MCP server), AI/legacy path = MCP (STDIO) + LLM.
+
+==========
+
+
 # Test Automation Backend
 
 Java Spring Boot backend for AI-powered test automation platform.
