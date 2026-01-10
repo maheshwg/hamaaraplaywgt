@@ -448,6 +448,61 @@ To make this robust:
 - Prefer mapping to **`call_method`** first (more stable, less metadata needed).
 - Add **element-action mapping** only if you actually want tests that do “click/fill X” without writing a method.
 
+## What we implemented in this repo for the JAR approach (current state)
+
+This section reflects the code that now exists in the backend/frontend.
+
+### Backend: App fields
+
+`com.youraitester.model.app.App` now includes:
+- `executionMode`: `DB_METHOD_BODY` (default) or `JAR_PLUGIN`
+- `pluginJarPath`, `pluginVersion`, `pluginSha256`
+
+### Backend: plugin API + loader
+
+- **Plugin API**: `com.youraitester.plugin.api.AppPlugin`
+  - Discovered via Java `ServiceLoader`
+  - Plugin jars must include: `META-INF/services/com.youraitester.plugin.api.AppPlugin`
+
+- **Loader**: `com.youraitester.service.PluginJarLoaderService`
+  - Loads jar via `URLClassLoader` + `ServiceLoader`
+  - Enforces allowlist root for jar paths (default `backend/plugins` via `plugin.jar.allowedRoot=plugins`)
+  - Optionally verifies SHA-256 if `app.pluginSha256` is provided
+
+### Backend: method execution + runner wiring
+
+- **Jar method executor**: `com.youraitester.service.JarMethodExecutionService`
+  - Instantiates a screen via `(Page)` constructor (or plugin factory)
+  - Invokes methods reflectively
+  - If return type is boolean:
+    - `false` fails the step
+    - `null` when boolean expected fails the step
+
+- **Runner switch**: `com.youraitester.service.TestExecutionService`
+  - For `call_method` steps:
+    - `DB_METHOD_BODY` → `StoredMethodExecutionService.execute(...)`
+    - `JAR_PLUGIN` → `JarMethodExecutionService.invoke(...)`
+
+### Backend: mapping (LLM prompt targets)
+
+`com.youraitester.service.TestStepMappingService` now:
+- When `app.executionMode=JAR_PLUGIN`, loads plugin and uses **plugin screens + methods** as LLM prompt targets
+- Continues to allow **DB elements** for element-action mapping (if present)
+
+### Backend: SUPER_ADMIN endpoints for plugin settings
+
+`com.youraitester.controller.AppAdminController`:
+- `PUT /api/admin/apps/{appId}/plugin`
+  - Updates: `executionMode`, `pluginJarPath`, `pluginVersion`, `pluginSha256`
+
+### Frontend: Super Admin “App Details” UI
+
+`src/pages/admin/AdminAppDetails.jsx` now shows an additional **Execution / Plugin Settings** card for SUPER_ADMIN:
+- execution mode dropdown
+- plugin jar path
+- plugin version
+- plugin sha256 (optional)
+
 
 ## Current approach (today): DB screen metadata + save-time mapping + custom stored-method executor
 

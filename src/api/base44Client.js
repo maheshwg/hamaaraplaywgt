@@ -172,69 +172,65 @@ export const base44 = {
             // Normalize batch_id field
             run.batch_id = run.batch_id || run.batchId || null;
             run.batchId = run.batchId || run.batch_id || null;
+            // Normalize test_id field
+            run.test_id = run.test_id || run.testId || null;
+            run.testId = run.testId || run.test_id || null;
             // Normalize test_name field
             run.test_name = run.test_name || run.testName || null;
             run.testName = run.testName || run.test_name || null;
+            // Normalize started/completed timestamps
+            run.started_at = run.started_at || run.startedAt || null;
+            run.startedAt = run.startedAt || run.started_at || null;
+            run.completed_at = run.completed_at || run.completedAt || null;
+            run.completedAt = run.completedAt || run.completed_at || null;
+            // Normalize duration (ms)
+            run.duration_ms = run.duration_ms || run.durationMs || run.duration || null;
+            run.durationMs = run.durationMs || run.duration_ms || run.duration || null;
           }
           return run;
       },
-      list: async (sortOrTestId) => {
-        // If first param looks like a sort parameter (starts with - or +), fetch all runs
-        if (sortOrTestId && (sortOrTestId.startsWith('-') || sortOrTestId.startsWith('+'))) {
-          const projectId = typeof window !== 'undefined' ? localStorage.getItem('selectedProjectId') : null;
-          const url = projectId ? `${API_BASE_URL}/tests/runs?projectId=${encodeURIComponent(projectId)}` : `${API_BASE_URL}/tests/runs`;
-          const response = await fetch(url, { headers: authHeaders() });
-          const runs = await response.json();
-          return (runs || []).map(r => {
-            r.step_results = r.step_results || r.stepResults || [];
-            r.stepResults = r.stepResults || r.step_results || [];
-            // Normalize step results extractedVariables
-            if (r.step_results) {
-              r.step_results = r.step_results.map(step => {
-                step.extracted_variables = step.extracted_variables || step.extractedVariables || {};
-                step.extractedVariables = step.extractedVariables || step.extracted_variables || {};
-                return step;
-              });
-            }
-            // Normalize batch_id field
-            r.batch_id = r.batch_id || r.batchId || null;
-            r.batchId = r.batchId || r.batch_id || null;
-            // Normalize test_name field
-            r.test_name = r.test_name || r.testName || null;
-            r.testName = r.testName || r.test_name || null;
-            return r;
-          });
-        }
-        // Otherwise treat it as a testId and fetch runs for that specific test
-        if (sortOrTestId) {
-          const response = await fetch(`${API_BASE_URL}/tests/${sortOrTestId}/runs`, { headers: authHeaders() });
-          const runs = await response.json();
-          return (runs || []).map(r => {
-            r.step_results = r.step_results || r.stepResults || [];
-            r.stepResults = r.stepResults || r.step_results || [];
-            // Normalize step results extractedVariables
-            if (r.step_results) {
-              r.step_results = r.step_results.map(step => {
-                step.extracted_variables = step.extracted_variables || step.extractedVariables || {};
-                step.extractedVariables = step.extractedVariables || step.extracted_variables || {};
-                return step;
-              });
-            }
-            // Normalize batch_id field
-            r.batch_id = r.batch_id || r.batchId || null;
-            r.batchId = r.batchId || r.batch_id || null;
-            // Normalize test_name field
-            r.test_name = r.test_name || r.testName || null;
-            r.testName = r.testName || r.test_name || null;
-            return r;
-          });
-        }
-        // No params - fetch all runs
-        const projectId = typeof window !== 'undefined' ? localStorage.getItem('selectedProjectId') : null;
-        const url = projectId ? `${API_BASE_URL}/tests/runs?projectId=${encodeURIComponent(projectId)}` : `${API_BASE_URL}/tests/runs`;
-        const response = await fetch(url, { headers: authHeaders() });
-        const runs = await response.json();
-        return (runs || []).map(r => {
+      list: async (sortOrTestId, limit) => {
+        const applySortAndLimit = (arr) => {
+          let out = Array.isArray(arr) ? [...arr] : [];
+
+          // Client-side sort: backend endpoint doesn't currently accept a sort param.
+          if (sortOrTestId && (sortOrTestId.startsWith('-') || sortOrTestId.startsWith('+'))) {
+            const dir = sortOrTestId.startsWith('-') ? -1 : 1; // - means DESC
+            const field = sortOrTestId.slice(1);
+            const asTime = (v) => {
+              if (!v) return 0;
+              const t = new Date(v).getTime();
+              return Number.isFinite(t) ? t : 0;
+            };
+            const getField = (r) => {
+              if (!r) return null;
+              if (field === 'started_at' || field === 'startedAt') return r.startedAt || r.started_at;
+              if (field === 'completed_at' || field === 'completedAt') return r.completedAt || r.completed_at;
+              if (field === 'created_date' || field === 'createdDate') return r.createdDate || r.created_date;
+              return r[field];
+            };
+            out.sort((a, b) => {
+              const av = getField(a);
+              const bv = getField(b);
+              // Time-ish fields
+              if (field.includes('at') || field.toLowerCase().includes('date')) {
+                return dir * (asTime(av) - asTime(bv));
+              }
+              // Fallback string/number compare
+              if (typeof av === 'number' && typeof bv === 'number') return dir * (av - bv);
+              return dir * String(av ?? '').localeCompare(String(bv ?? ''));
+            });
+          }
+
+          const n = typeof limit === 'number' ? limit : parseInt(limit, 10);
+          if (Number.isFinite(n) && n > 0) {
+            out = out.slice(0, n);
+          }
+          return out;
+        };
+
+        const normalizeRun = (r) => {
+          if (!r) return r;
           r.step_results = r.step_results || r.stepResults || [];
           r.stepResults = r.stepResults || r.step_results || [];
           // Normalize step results extractedVariables
@@ -245,8 +241,46 @@ export const base44 = {
               return step;
             });
           }
+          // Normalize batch_id field
+          r.batch_id = r.batch_id || r.batchId || null;
+          r.batchId = r.batchId || r.batch_id || null;
+          // Normalize test_id field
+          r.test_id = r.test_id || r.testId || null;
+          r.testId = r.testId || r.test_id || null;
+          // Normalize test_name field
+          r.test_name = r.test_name || r.testName || null;
+          r.testName = r.testName || r.test_name || null;
+          // Normalize started/completed timestamps
+          r.started_at = r.started_at || r.startedAt || null;
+          r.startedAt = r.startedAt || r.started_at || null;
+          r.completed_at = r.completed_at || r.completedAt || null;
+          r.completedAt = r.completedAt || r.completed_at || null;
+          // Normalize duration (ms)
+          r.duration_ms = r.duration_ms || r.durationMs || r.duration || null;
+          r.durationMs = r.durationMs || r.duration_ms || r.duration || null;
           return r;
-        });
+        };
+
+        // If first param looks like a sort parameter (starts with - or +), fetch all runs
+        if (sortOrTestId && (sortOrTestId.startsWith('-') || sortOrTestId.startsWith('+'))) {
+          const projectId = typeof window !== 'undefined' ? localStorage.getItem('selectedProjectId') : null;
+          const url = projectId ? `${API_BASE_URL}/tests/runs?projectId=${encodeURIComponent(projectId)}` : `${API_BASE_URL}/tests/runs`;
+          const response = await fetch(url, { headers: authHeaders() });
+          const runs = await response.json();
+          return applySortAndLimit((runs || []).map(normalizeRun));
+        }
+        // Otherwise treat it as a testId and fetch runs for that specific test
+        if (sortOrTestId) {
+          const response = await fetch(`${API_BASE_URL}/tests/${sortOrTestId}/runs`, { headers: authHeaders() });
+          const runs = await response.json();
+          return applySortAndLimit((runs || []).map(normalizeRun));
+        }
+        // No params - fetch all runs
+        const projectId = typeof window !== 'undefined' ? localStorage.getItem('selectedProjectId') : null;
+        const url = projectId ? `${API_BASE_URL}/tests/runs?projectId=${encodeURIComponent(projectId)}` : `${API_BASE_URL}/tests/runs`;
+        const response = await fetch(url, { headers: authHeaders() });
+        const runs = await response.json();
+        return applySortAndLimit((runs || []).map(normalizeRun));
       },
       filter: async (params) => {
         if (params.id) {
@@ -266,6 +300,20 @@ export const base44 = {
             // Normalize batch_id field
             run.batch_id = run.batch_id || run.batchId || null;
             run.batchId = run.batchId || run.batch_id || null;
+            // Normalize test_id field
+            run.test_id = run.test_id || run.testId || null;
+            run.testId = run.testId || run.test_id || null;
+            // Normalize test_name field
+            run.test_name = run.test_name || run.testName || null;
+            run.testName = run.testName || run.test_name || null;
+            // Normalize started/completed timestamps
+            run.started_at = run.started_at || run.startedAt || null;
+            run.startedAt = run.startedAt || run.started_at || null;
+            run.completed_at = run.completed_at || run.completedAt || null;
+            run.completedAt = run.completedAt || run.completed_at || null;
+            // Normalize duration (ms)
+            run.duration_ms = run.duration_ms || run.durationMs || run.duration || null;
+            run.durationMs = run.durationMs || run.duration_ms || run.duration || null;
           }
           return [run]; // Return as array to match expected format
         }
@@ -284,6 +332,23 @@ export const base44 = {
               return step;
             });
           }
+          // Normalize batch_id field
+          r.batch_id = r.batch_id || r.batchId || null;
+          r.batchId = r.batchId || r.batch_id || null;
+          // Normalize test_id field
+          r.test_id = r.test_id || r.testId || null;
+          r.testId = r.testId || r.test_id || null;
+          // Normalize test_name field
+          r.test_name = r.test_name || r.testName || null;
+          r.testName = r.testName || r.test_name || null;
+          // Normalize started/completed timestamps
+          r.started_at = r.started_at || r.startedAt || null;
+          r.startedAt = r.startedAt || r.started_at || null;
+          r.completed_at = r.completed_at || r.completedAt || null;
+          r.completedAt = r.completedAt || r.completed_at || null;
+          // Normalize duration (ms)
+          r.duration_ms = r.duration_ms || r.durationMs || r.duration || null;
+          r.durationMs = r.durationMs || r.duration_ms || r.duration || null;
           return r;
         });
       },

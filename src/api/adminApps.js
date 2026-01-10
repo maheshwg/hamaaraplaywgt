@@ -50,6 +50,40 @@ export async function updateAdminAppInfo(appId, info) {
   return res.json();
 }
 
+export async function updateAdminAppPluginSettings(appId, payload) {
+  const res = await fetch(`${API_BASE}/api/admin/apps/${appId}/plugin`, {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: JSON.stringify(payload || {})
+  });
+  if (!res.ok) {
+    let text = await res.text();
+    throw new Error(`Failed to save plugin settings (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function describeAdminAppPlugin(appId) {
+  const res = await fetch(`${API_BASE}/api/admin/apps/${appId}/plugin/describe`, { headers: authHeaders() });
+  if (!res.ok) {
+    let text = await res.text();
+    throw new Error(`Failed to validate plugin (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function deleteAdminApp(appId) {
+  const res = await fetch(`${API_BASE}/api/admin/apps/${appId}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    let text = await res.text();
+    throw new Error(`Failed to delete app (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
 export async function upsertAdminScreen(appId, screenName, payload) {
   const res = await fetch(`${API_BASE}/api/admin/apps/${appId}/screens/${encodeURIComponent(screenName)}`, {
     method: 'PUT',

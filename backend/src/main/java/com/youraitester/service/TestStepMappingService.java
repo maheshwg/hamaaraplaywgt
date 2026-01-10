@@ -8,6 +8,7 @@ import com.youraitester.model.TestStep;
 import com.youraitester.model.app.App;
 import com.youraitester.model.app.Screen;
 import com.youraitester.model.app.ScreenElement;
+import com.youraitester.model.app.ScreenMethod;
 import com.youraitester.repository.app.AppRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -15,10 +16,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Save-time mapping:
@@ -37,6 +40,7 @@ public class TestStepMappingService {
     private final AppRepository appRepository;
     private final ScreenInferenceService screenInferenceService;
     private final Map<String, LlmProvider> providers;
+    private final PluginJarLoaderService pluginJarLoaderService;
 
     @Value("${agent.llm.provider:openai}")
     private String providerName;
@@ -260,7 +264,22 @@ public class TestStepMappingService {
         LlmProvider provider = providers.get(providerName);
         if (provider == null || !provider.isAvailable()) return null;
 
-        String context = buildLlmMappingPrompt(app, screens, candidateScreenNames, lastScreen, executedSoFar, instruction);
+        // In JAR_PLUGIN mode, methods come from the plugin jar (compiled page objects), not the DB method registry.
+        // We still include DB elements (if any) so element-action mapping can work too.
+        List<Screen> screensForPrompt = screens;
+        List<String> candidateNamesForPrompt = candidateScreenNames;
+        if (app != null && app.getExecutionMode() == App.ExecutionMode.JAR_PLUGIN) {
+            try {
+                var lp = pluginJarLoaderService.loadForApp(app);
+                screensForPrompt = mergeDbElementsWithPluginMethods(screens, lp.plugin());
+                candidateNamesForPrompt = new ArrayList<>();
+                if (lp.plugin().getScreenNames() != null) candidateNamesForPrompt.addAll(lp.plugin().getScreenNames());
+            } catch (Exception e) {
+                log.warn("[MAP-LLM] JAR_PLUGIN enabled but plugin could not be loaded for mapping (falling back to DB targets). {}", e.getMessage());
+            }
+        }
+
+        String context = buildLlmMappingPrompt(app, screensForPrompt, candidateNamesForPrompt, lastScreen, executedSoFar, instruction);
         List<LlmProvider.Message> messages = new ArrayList<>();
         messages.add(SimpleMessage.system(
             "You map natural language test steps to a deterministic action targeting a known element or method. " +
@@ -291,13 +310,13 @@ public class TestStepMappingService {
         if (mapped.targetType != null) mapped.targetType = mapped.targetType.trim().toLowerCase(Locale.ROOT);
 
         // Validate screen is one of candidates (if provided)
-        if (mapped.screen != null && !mapped.screen.isBlank() && candidateScreenNames != null && !candidateScreenNames.isEmpty()) {
+        if (mapped.screen != null && !mapped.screen.isBlank() && candidateNamesForPrompt != null && !candidateNamesForPrompt.isEmpty()) {
             boolean ok = false;
-            for (String s : candidateScreenNames) {
+            for (String s : candidateNamesForPrompt) {
                 if (s != null && s.equalsIgnoreCase(mapped.screen)) { ok = true; mapped.screen = s; break; }
             }
             if (!ok) {
-                log.warn("[MAP-LLM] LLM returned screen='{}' not in candidates {}", mapped.screen, candidateScreenNames);
+                log.warn("[MAP-LLM] LLM returned screen='{}' not in candidates {}", mapped.screen, candidateNamesForPrompt);
                 return null;
             }
         }
@@ -305,10 +324,10 @@ public class TestStepMappingService {
         // Validate target exists on screen (element or method)
         if ("call_method".equals(mapped.action)) {
             if (mapped.screen == null || mapped.target == null) return null;
-            if (!methodExists(screens, mapped.screen, mapped.target)) return null;
+            if (!methodExists(screensForPrompt, mapped.screen, mapped.target)) return null;
         } else if (!"navigate".equals(mapped.action)) {
             if (mapped.screen == null || mapped.target == null) return null;
-            if (!elementExists(screens, mapped.screen, mapped.target)) return null;
+            if (!elementExists(screensForPrompt, mapped.screen, mapped.target)) return null;
         }
 
         log.info("[MAP-LLM] Mapped: action={} screen={} targetType={} target={} value={}",
@@ -342,6 +361,78 @@ public class TestStepMappingService {
                 if (m.getMethodName().equalsIgnoreCase(methodName)) return true;
             }
             return false;
+        }
+        return false;
+    }
+
+    /**
+     * Creates a prompt-friendly view of screens where:
+     * - elements come from DB (if available)
+     * - methods come from plugin jar (compiled classes)
+     *
+     * This lets us do method-only jar execution while still allowing element actions if DB elements exist.
+     */
+    private List<Screen> mergeDbElementsWithPluginMethods(List<Screen> dbScreens, com.youraitester.plugin.api.AppPlugin plugin) {
+        List<Screen> out = new ArrayList<>();
+        if (plugin == null) return dbScreens != null ? dbScreens : List.of();
+
+        Set<String> pluginScreens = plugin.getScreenNames() != null ? plugin.getScreenNames() : Set.of();
+
+        // Union of screen names (plugin + db)
+        List<String> names = new ArrayList<>();
+        for (String s : pluginScreens) {
+            if (s != null && !s.isBlank() && !containsIgnoreCase(names, s)) names.add(s);
+        }
+        if (dbScreens != null) {
+            for (Screen s : dbScreens) {
+                if (s == null || s.getName() == null || s.getName().isBlank()) continue;
+                if (!containsIgnoreCase(names, s.getName())) names.add(s.getName());
+            }
+        }
+
+        for (String screenName : names) {
+            Screen synthetic = new Screen();
+            synthetic.setName(screenName);
+
+            // attach DB elements if present for this screen
+            if (dbScreens != null) {
+                for (Screen s : dbScreens) {
+                    if (s != null && s.getName() != null && s.getName().equalsIgnoreCase(screenName)) {
+                        synthetic.setElements(s.getElements());
+                        break;
+                    }
+                }
+            }
+
+            // attach plugin methods (names only) for this screen
+            List<ScreenMethod> methods = new ArrayList<>();
+            Class<?> cls = null;
+            try { cls = plugin.getScreenClass(screenName); } catch (Exception ignored) {}
+            if (cls != null) {
+                for (Method m : cls.getMethods()) {
+                    if (m == null) continue;
+                    if (m.getDeclaringClass() == Object.class) continue;
+                    if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+                    String mn = m.getName();
+                    if (mn == null || mn.isBlank()) continue;
+                    // avoid duplicates (overloads) for prompt display; mapping is method-name based
+                    if (methods.stream().anyMatch(x -> x != null && x.getMethodName() != null && x.getMethodName().equalsIgnoreCase(mn))) continue;
+                    ScreenMethod sm = new ScreenMethod();
+                    sm.setMethodName(mn);
+                    methods.add(sm);
+                }
+            }
+            synthetic.setMethods(methods);
+            out.add(synthetic);
+        }
+
+        return out;
+    }
+
+    private boolean containsIgnoreCase(List<String> list, String value) {
+        if (list == null || value == null) return false;
+        for (String s : list) {
+            if (s != null && s.equalsIgnoreCase(value)) return true;
         }
         return false;
     }

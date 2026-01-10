@@ -52,6 +52,7 @@ public class TestExecutionService {
     private final OfficialPlaywrightMcpService mcpService;
     private final PlaywrightJavaService playwrightJavaService;
     private final StoredMethodExecutionService storedMethodExecutionService;
+    private final JarMethodExecutionService jarMethodExecutionService;
     private final AppRepository appRepository;
     private final ScreenRepository screenRepository;
     private final ScreenInferenceService screenInferenceService;
@@ -632,28 +633,40 @@ public class TestExecutionService {
                 if ("call_method".equals(parsed.action)) {
                     String methodName = parsed.elementName;
                     String arg = parsed.value;
-                    Screen screen = screenRepository.findByApp_IdAndName(appId, screenName)
-                        .orElseThrow(() -> new RuntimeException("Screen not found for appId=" + appId + " name=" + screenName));
-                    List<String> args = arg != null ? List.of(arg) : List.of();
-                    StoredMethodExecutionService.StoredMethodResult r = storedMethodExecutionService.execute(screen, methodName, args);
-                    if (r != null && r.getBooleanValue() != null && !r.getBooleanValue()) {
-                        // Keep UI clean; details stay in logs
-                        String fail = r.getFailureMessage();
-                        throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification failed.");
-                    }
-                    if (r != null && r.isBooleanReturnExpected() && r.getBooleanValue() == null) {
-                        String fail = r.getFailureMessage();
-                        throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification returned no result.");
-                    }
-                    if (r != null && r.getSuccessMessage() != null && !r.getSuccessMessage().isBlank()) {
-                        sr.setNotes(r.getSuccessMessage());
-                    }
-                    if (r != null && r.getExtractedVariables() != null && !r.getExtractedVariables().isEmpty()) {
-                        sr.setExtractedVariables(mergeExtracted(sr.getExtractedVariables(), r.getExtractedVariables()));
-                        Map<String, Object> currentVars = testRun.getVariables();
-                        currentVars.putAll(r.getExtractedVariables());
-                        testRun.setVariables(currentVars);
-                        testRunRepository.save(testRun);
+                    List<String> args = arg != null ? List.of(resolveTemplate(arg, variables)) : List.of();
+
+                    if (app.getExecutionMode() == App.ExecutionMode.JAR_PLUGIN) {
+                        JarMethodExecutionService.InvocationResult jr =
+                            jarMethodExecutionService.invoke(app, screenName, methodName, args);
+                        if (jr != null && jr.booleanReturnExpected() && jr.booleanValue() != null && !jr.booleanValue()) {
+                            throw new UserFacingStepException("Verification failed.");
+                        }
+                        if (jr != null && jr.booleanReturnExpected() && jr.booleanValue() == null) {
+                            throw new UserFacingStepException("Verification returned no result.");
+                        }
+                    } else {
+                        Screen screen = screenRepository.findByApp_IdAndName(appId, screenName)
+                            .orElseThrow(() -> new RuntimeException("Screen not found for appId=" + appId + " name=" + screenName));
+                        StoredMethodExecutionService.StoredMethodResult r = storedMethodExecutionService.execute(screen, methodName, args);
+                        if (r != null && r.getBooleanValue() != null && !r.getBooleanValue()) {
+                            // Keep UI clean; details stay in logs
+                            String fail = r.getFailureMessage();
+                            throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification failed.");
+                        }
+                        if (r != null && r.isBooleanReturnExpected() && r.getBooleanValue() == null) {
+                            String fail = r.getFailureMessage();
+                            throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification returned no result.");
+                        }
+                        if (r != null && r.getSuccessMessage() != null && !r.getSuccessMessage().isBlank()) {
+                            sr.setNotes(r.getSuccessMessage());
+                        }
+                        if (r != null && r.getExtractedVariables() != null && !r.getExtractedVariables().isEmpty()) {
+                            sr.setExtractedVariables(mergeExtracted(sr.getExtractedVariables(), r.getExtractedVariables()));
+                            Map<String, Object> currentVars = testRun.getVariables();
+                            currentVars.putAll(r.getExtractedVariables());
+                            testRun.setVariables(currentVars);
+                            testRunRepository.save(testRun);
+                        }
                     }
                     // screenshot handled below
                 } else {
@@ -772,23 +785,34 @@ public class TestExecutionService {
                 String screenName = parts[0];
                 String methodName = parts[1];
 
-                Screen screen = screenRepository.findByApp_IdAndName(app.getId(), screenName)
-                    .orElseThrow(() -> new RuntimeException("Screen not found for appId=" + app.getId() + " name=" + screenName));
-
                 List<String> rawArgs = storedMethodExecutionService.parseArgsFromStepValue(step.getValue());
                 List<String> args = new java.util.ArrayList<>();
                 for (String a : rawArgs) args.add(resolveTemplate(a, variables));
-                StoredMethodExecutionService.StoredMethodResult r = storedMethodExecutionService.execute(screen, methodName, args);
-                if (r != null && r.getBooleanValue() != null && !r.getBooleanValue()) {
-                    String fail = r.getFailureMessage();
-                    throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification failed.");
+
+                if (app.getExecutionMode() == App.ExecutionMode.JAR_PLUGIN) {
+                    JarMethodExecutionService.InvocationResult jr =
+                        jarMethodExecutionService.invoke(app, screenName, methodName, args);
+                    if (jr != null && jr.booleanReturnExpected() && jr.booleanValue() != null && !jr.booleanValue()) {
+                        throw new UserFacingStepException("Verification failed.");
+                    }
+                    if (jr != null && jr.booleanReturnExpected() && jr.booleanValue() == null) {
+                        throw new UserFacingStepException("Verification returned no result.");
+                    }
+                } else {
+                    Screen screen = screenRepository.findByApp_IdAndName(app.getId(), screenName)
+                        .orElseThrow(() -> new RuntimeException("Screen not found for appId=" + app.getId() + " name=" + screenName));
+                    StoredMethodExecutionService.StoredMethodResult r = storedMethodExecutionService.execute(screen, methodName, args);
+                    if (r != null && r.getBooleanValue() != null && !r.getBooleanValue()) {
+                        String fail = r.getFailureMessage();
+                        throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification failed.");
+                    }
+                    if (r != null && r.isBooleanReturnExpected() && r.getBooleanValue() == null) {
+                        String fail = r.getFailureMessage();
+                        throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification returned no result.");
+                    }
+                    successMessage = r != null ? r.getSuccessMessage() : null;
+                    extracted = (r != null && r.getExtractedVariables() != null) ? r.getExtractedVariables() : Map.of();
                 }
-                if (r != null && r.isBooleanReturnExpected() && r.getBooleanValue() == null) {
-                    String fail = r.getFailureMessage();
-                    throw new UserFacingStepException((fail != null && !fail.isBlank()) ? fail : "Verification returned no result.");
-                }
-                successMessage = r != null ? r.getSuccessMessage() : null;
-                extracted = (r != null && r.getExtractedVariables() != null) ? r.getExtractedVariables() : Map.of();
             }
             default -> throw new RuntimeException("Unsupported mapped action: " + action);
         }

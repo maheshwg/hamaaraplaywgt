@@ -9,9 +9,11 @@ import com.youraitester.model.app.Screen;
 import com.youraitester.model.app.ScreenElement;
 import com.youraitester.model.app.ScreenMethod;
 import com.youraitester.model.app.ScreenMethodParam;
+import com.youraitester.repository.TestRepository;
 import com.youraitester.repository.app.AppRepository;
 import com.youraitester.service.JavaLocatorImportService;
 import com.youraitester.service.JavaMethodImportService;
+import com.youraitester.service.PluginJarLoaderService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -19,6 +21,8 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -32,8 +36,10 @@ import java.util.Map;
 public class AppAdminController {
 
     private final AppRepository appRepository;
+    private final TestRepository testRepository;
     private final JavaLocatorImportService javaLocatorImportService;
     private final JavaMethodImportService javaMethodImportService;
+    private final PluginJarLoaderService pluginJarLoaderService;
 
     /**
      * Returns all apps with their info (for Super Admin app metadata management).
@@ -101,6 +107,142 @@ public class AppAdminController {
         app.setInfo(info);
         App saved = appRepository.save(app);
         return ResponseEntity.ok(saved);
+    }
+
+    /**
+     * Update plugin/JAR execution settings for an app.
+     *
+     * Body (all optional):
+     * {
+     *   "executionMode": "DB_METHOD_BODY|JAR_PLUGIN",
+     *   "pluginJarPath": "plugins/saucedemo-plugin-1.0.0.jar",
+     *   "pluginVersion": "1.0.0",
+     *   "pluginSha256": "<sha256 hex>"
+     * }
+     */
+    @PutMapping("/{appId}/plugin")
+    public ResponseEntity<?> updatePluginSettings(@PathVariable Long appId, @RequestBody Map<String, String> body) {
+        App app = appRepository.findById(appId).orElse(null);
+        if (app == null) return ResponseEntity.notFound().build();
+
+        String executionMode = body != null ? body.get("executionMode") : null;
+        String pluginJarPath = body != null ? body.get("pluginJarPath") : null;
+        String pluginVersion = body != null ? body.get("pluginVersion") : null;
+        String pluginSha256 = body != null ? body.get("pluginSha256") : null;
+
+        if (executionMode != null && !executionMode.isBlank()) {
+            try {
+                app.setExecutionMode(App.ExecutionMode.valueOf(executionMode.trim().toUpperCase()));
+            } catch (Exception e) {
+                return ResponseEntity.badRequest().body(Map.of(
+                    "error", "bad_request",
+                    "message", "executionMode must be one of: DB_METHOD_BODY, JAR_PLUGIN"
+                ));
+            }
+        }
+
+        if (pluginJarPath != null) {
+            String p = pluginJarPath.trim();
+            if (!p.isEmpty() && !p.toLowerCase().endsWith(".jar")) {
+                return ResponseEntity.badRequest().body(Map.of(
+                    "error", "bad_request",
+                    "message", "pluginJarPath must end with .jar"
+                ));
+            }
+            if (p.length() > 1000) {
+                return ResponseEntity.badRequest().body(Map.of(
+                    "error", "bad_request",
+                    "message", "pluginJarPath must be <= 1000 characters"
+                ));
+            }
+            app.setPluginJarPath(p.isEmpty() ? null : p);
+        }
+
+        if (pluginVersion != null) {
+            String v = pluginVersion.trim();
+            if (v.length() > 200) {
+                return ResponseEntity.badRequest().body(Map.of(
+                    "error", "bad_request",
+                    "message", "pluginVersion must be <= 200 characters"
+                ));
+            }
+            app.setPluginVersion(v.isEmpty() ? null : v);
+        }
+
+        if (pluginSha256 != null) {
+            String s = pluginSha256.trim().toLowerCase();
+            if (!s.isEmpty() && (s.length() < 32 || s.length() > 128)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                    "error", "bad_request",
+                    "message", "pluginSha256 must be a hex string (length 32-128)"
+                ));
+            }
+            app.setPluginSha256(s.isEmpty() ? null : s);
+        }
+
+        App saved = appRepository.save(app);
+        return ResponseEntity.ok(saved);
+    }
+
+    /**
+     * Validate and describe the configured plugin jar for an app.
+     *
+     * This loads the jar (enforcing allowlist + optional sha256 verification) and returns:
+     * - plugin appName
+     * - jar path + computed sha256
+     * - screens and their public instance methods (for mapping/debugging)
+     */
+    @GetMapping("/{appId}/plugin/describe")
+    public ResponseEntity<?> describePlugin(@PathVariable Long appId) {
+        App app = appRepository.findById(appId).orElse(null);
+        if (app == null) return ResponseEntity.notFound().build();
+
+        try {
+            PluginJarLoaderService.LoadedPlugin lp = pluginJarLoaderService.loadForApp(app);
+            var plugin = lp.plugin();
+
+            Map<String, Object> out = new HashMap<>();
+            out.put("appId", app.getId());
+            out.put("appName", app.getName());
+            out.put("executionMode", app.getExecutionMode());
+            out.put("pluginJarPath", app.getPluginJarPath());
+            out.put("pluginVersion", app.getPluginVersion());
+            out.put("pluginSha256Expected", app.getPluginSha256());
+
+            out.put("loadedJarPath", lp.jarPath().toString());
+            out.put("loadedJarSha256", lp.sha256());
+            out.put("pluginAppName", plugin.getAppName());
+            out.put("screenNames", plugin.getScreenNames());
+
+            Map<String, Object> methodsByScreen = new HashMap<>();
+            if (plugin.getScreenNames() != null) {
+                for (String screen : plugin.getScreenNames()) {
+                    if (screen == null || screen.isBlank()) continue;
+                    Class<?> cls = null;
+                    try { cls = plugin.getScreenClass(screen); } catch (Exception ignored) {}
+                    if (cls == null) {
+                        methodsByScreen.put(screen, List.of());
+                        continue;
+                    }
+                    List<String> methodNames = new ArrayList<>();
+                    for (Method m : cls.getMethods()) {
+                        if (m == null) continue;
+                        if (m.getDeclaringClass() == Object.class) continue;
+                        if (Modifier.isStatic(m.getModifiers())) continue;
+                        methodNames.add(m.getName());
+                    }
+                    methodsByScreen.put(screen, methodNames);
+                }
+            }
+            out.put("methodsByScreen", methodsByScreen);
+
+            return ResponseEntity.ok(out);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "error", "bad_request",
+                "message", e.getMessage()
+            ));
+        }
     }
 
     /**
@@ -195,7 +337,7 @@ public class AppAdminController {
      * Example:
      * POST /api/admin/apps/by-name/testautomationpractice/screens/homepage/import-elements-from-java?sourcePath=src/main/java/testautomationpractice/HomePage.java
      */
-    @PostMapping("/,{appName}/screens/{screenName}/import-elements-from-java")
+    @PostMapping("/by-name/{appName}/screens/{screenName}/import-elements-from-java")
     @Transactional
     public ResponseEntity<?> importElementsFromHomePageJava(@PathVariable String appName,
                                                             @PathVariable String screenName,
@@ -281,6 +423,36 @@ public class AppAdminController {
         app.getScreens().removeIf(s -> s != null && s.getName() != null && s.getName().equalsIgnoreCase(screenName));
         appRepository.save(app);
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * SUPER_ADMIN: delete an app and its screen registry.
+     *
+     * Safety: before deleting the app, we unlink any tests that reference this appId by setting test.appId = null.
+     * This avoids breaking existing tests due to FK constraints and makes the impact explicit in the response.
+     */
+    @DeleteMapping("/{appId}")
+    @Transactional
+    public ResponseEntity<?> deleteApp(@PathVariable Long appId) {
+        App app = appRepository.findById(appId).orElse(null);
+        if (app == null) return ResponseEntity.notFound().build();
+
+        int unlinked = 0;
+        try {
+            unlinked = testRepository.clearAppIdForTests(appId);
+        } catch (Exception e) {
+            log.warn("Failed to unlink tests for appId={} before delete: {}", appId, e.getMessage());
+        }
+
+        String appName = app.getName();
+        appRepository.delete(app);
+
+        return ResponseEntity.ok(Map.of(
+            "deleted", true,
+            "appId", appId,
+            "appName", appName,
+            "testsUnlinked", unlinked
+        ));
     }
 
     private Screen findOrCreateScreen(App app, String screenName) {

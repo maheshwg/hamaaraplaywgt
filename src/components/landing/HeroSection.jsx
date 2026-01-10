@@ -44,13 +44,11 @@ export default function HeroSection() {
             transition={{ duration: 0.5, delay: 0.1 }}
             className="text-5xl sm:text-6xl lg:text-7xl xl:text-8xl font-bold tracking-tight mb-6"
           >
-            <span className="text-white">Your AI Tester</span>
+            <span className="text-white drop-shadow-[0_10px_30px_rgba(99,102,241,0.25)]">AI Test Engineer</span>
             <br />
             <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-400 via-blue-400 to-cyan-400">
-              Tests using natural language.
+              for modern teams
             </span>
-            <br />
-            <span className="text-white">Zero Vendor Lock-In.</span>
           </MotionDiv>
 
           {/* Subheadline */}
@@ -58,11 +56,18 @@ export default function HeroSection() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, delay: 0.2 }}
-            className="text-xl sm:text-2xl text-slate-400 max-w-3xl mx-auto mb-8 leading-relaxed"
+            className="text-lg sm:text-xl lg:text-2xl text-slate-300 max-w-4xl mx-auto mb-8 leading-relaxed"
           >
-            get {' '}
-            <span className="text-green-500 font-medium">full automaton coverage</span>{' '}
-            in 5 days or less. Export to Playwright anytime.
+            <div className="text-2xl sm:text-3xl font-semibold text-white drop-shadow-[0_10px_30px_rgba(124,58,237,0.22)]">
+              Ship at speed, not at risk.
+            </div>
+            <div className="mt-3">
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-300 via-blue-300 to-cyan-300 font-semibold">
+                AI Agent
+              </span>{' '}
+              that turns natural language into full end-to-end automation in minutes. Scale your coverage instantly without the high cost of{' '}
+              <span className="text-slate-100 font-semibold">SDET overhead</span>.
+            </div>
           </MotionDiv>
 
           {/* Key Value Props */}
