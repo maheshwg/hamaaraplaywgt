@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { generateTestFromFlow } from "@/api/testGeneration";
 import { 
   Save, 
   ArrowLeft, 
@@ -20,6 +21,7 @@ import {
   Database,
   Tag,
   Settings2,
+  Sparkles,
   CheckCircle2,
   XCircle,
   RefreshCw,
@@ -43,6 +45,8 @@ export default function TestEditor() {
   const [optimisticRun, setOptimisticRun] = useState(null);
   const [expandedRuns, setExpandedRuns] = useState({});
   const [isRunning, setIsRunning] = useState(false);
+  const [generateFlowText, setGenerateFlowText] = useState('');
+  const [generating, setGenerating] = useState(false);
 
   const [formData, setFormData] = useState({
     name: '',
@@ -280,6 +284,11 @@ export default function TestEditor() {
       e.stopPropagation();
     }
     
+    // Don't allow a run while a save is in-flight
+    if (saveMutation.isPending) {
+      return;
+    }
+
     // Prevent if already running or mutation is pending
     if (isRunning || runMutation.isPending) {
       return;
@@ -315,6 +324,119 @@ export default function TestEditor() {
     });
   };
 
+  const onGenerateSteps = async () => {
+    const flowText = (generateFlowText || '').trim();
+    if (!flowText) return;
+
+    // If user already has steps, confirm overwrite (keep it simple for now).
+    if ((formData.steps || []).length > 0) {
+      const ok = window.confirm('Replace existing steps with generated steps?');
+      if (!ok) return;
+    }
+
+    // Prefer appId if already linked; otherwise fall back to appUrl (no-save required).
+    const appId = formData.appId || null;
+    const appUrl = (formData.appUrl || '').trim();
+    if (!appId && !appUrl) {
+      toast({
+        title: "App required",
+        description: "Please set Application URL first so we can resolve app info for step generation.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      setGenerating(true);
+      const resp = await generateTestFromFlow({ appId, appUrl: appId ? null : appUrl, flowText });
+      const steps = Array.isArray(resp?.steps) ? resp.steps : [];
+      const now = Date.now();
+      const newSteps = steps
+        .map((s, idx) => {
+          const instruction = (s && typeof s === 'object') ? (s.instruction || '') : String(s ?? '');
+          return {
+            id: `gen-step-${now}-${idx}`,
+            instruction,
+            order: idx,
+            type: null,
+            selector: null,
+            value: null,
+            optional: null,
+            waitAfter: null,
+            // IMPORTANT: do NOT include module_id here, otherwise StepEditor treats it as a module step.
+          };
+        })
+        .filter(s => (s.instruction || '').trim().length > 0)
+        .map((s, idx) => ({ ...s, order: idx }));
+
+      // Auto-create Test Data columns for any {{vars}} introduced in generated steps.
+      const varSet = new Set();
+      const varRe = /\{\{(\w+)\}\}/g;
+      for (const st of newSteps) {
+        const text = st?.instruction || '';
+        let m;
+        while ((m = varRe.exec(text)) !== null) {
+          if (m[1]) varSet.add(m[1]);
+        }
+      }
+      const vars = Array.from(varSet);
+
+      setFormData(prev => ({
+        ...prev,
+        name: (prev.name || '').trim() ? prev.name : (resp?.testName || prev.name),
+        steps: newSteps,
+        dataset_columns: (() => {
+          if (!vars.length) return prev.dataset_columns || [];
+          const existing = Array.isArray(prev.dataset_columns) ? prev.dataset_columns : [];
+          const out = [...existing];
+          for (const v of vars) {
+            if (!out.includes(v)) out.push(v);
+          }
+          return out;
+        })(),
+        dataset: (() => {
+          if (!vars.length) return prev.dataset || [];
+          const existingCols = Array.isArray(prev.dataset_columns) ? prev.dataset_columns : [];
+          const cols = [...existingCols];
+          for (const v of vars) {
+            if (!cols.includes(v)) cols.push(v);
+          }
+
+          const existingRows = Array.isArray(prev.dataset) ? prev.dataset : [];
+          if (existingRows.length === 0) {
+            const row = {};
+            for (const c of cols) row[c] = '';
+            return [row];
+          }
+          return existingRows.map(r => {
+            const row = { ...(r || {}) };
+            for (const c of cols) {
+              if (!(c in row)) row[c] = '';
+            }
+            return row;
+          });
+        })(),
+      }));
+
+      setGenerateFlowText('');
+
+      toast({
+        title: "Steps generated",
+        description: `Added ${newSteps.length} steps. Review and click Save to map them.`,
+        duration: 4000,
+        className: "bg-indigo-50 border-indigo-300",
+      });
+    } catch (e) {
+      toast({
+        title: "Generation failed",
+        description: e?.message || "Failed to generate steps.",
+        variant: "destructive",
+      });
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   if (testId && testLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-6">
@@ -330,7 +452,7 @@ export default function TestEditor() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
-      <div className="max-w-4xl mx-auto p-6 space-y-6">
+      <div className="max-w-5xl mx-auto p-6 space-y-6">
         {/* Project Selection Warning */}
         {!selectedProjectId && (
           <motion.div
@@ -354,7 +476,7 @@ export default function TestEditor() {
         <motion.div 
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="flex flex-col md:flex-row md:items-center md:justify-between gap-4"
+          className="sticky top-0 z-10 -mx-6 px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-slate-50/75 backdrop-blur border-b border-slate-200/70"
         >
           <div className="flex items-center gap-4">
             <Link to={createPageUrl('Tests')}>
@@ -376,15 +498,15 @@ export default function TestEditor() {
               variant="outline" 
               onClick={handleSave}
               disabled={saveMutation.isPending || !formData.name || !selectedProjectId}
-              className="gap-2"
+              className="gap-2 bg-white/60 hover:bg-white border-slate-200 shadow-sm"
             >
               <Save className="h-4 w-4" />
               {saveMutation.isPending ? 'Saving...' : 'Save'}
             </Button>
             <Button 
               onClick={handleRun}
-              disabled={isRunning || runMutation.isPending || !formData.name || formData.steps.length === 0 || !selectedProjectId}
-              className="gap-2 bg-indigo-600 hover:bg-indigo-700"
+              disabled={saveMutation.isPending || isRunning || runMutation.isPending || !formData.name || formData.steps.length === 0 || !selectedProjectId}
+              className="gap-2 bg-primary hover:bg-primary/90 shadow-sm"
             >
               <Play className="h-4 w-4" />
               {(isRunning || runMutation.isPending) ? 'Starting...' : 'Run Test'}
@@ -398,7 +520,7 @@ export default function TestEditor() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
         >
-          <Card>
+          <Card className="shadow-sm border-slate-200/70">
             <CardContent className="p-6 space-y-6">
               {/* Basic Info */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -429,8 +551,8 @@ export default function TestEditor() {
                 </div>
               </div>
 
-              {/* App URL and Type */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* App URL */}
+              <div className="grid grid-cols-1 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="appUrl">Application URL *</Label>
                   <Input
@@ -444,28 +566,10 @@ export default function TestEditor() {
                     The test will automatically navigate to this URL before running
                   </p>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="appType">Application Type</Label>
-                  <Select 
-                    value={formData.appType || 'other'} 
-                    onValueChange={(val) => setFormData({ ...formData, appType: val })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="other">Other / Generic</SelectItem>
-                      <SelectItem value="react-spa">React SPA</SelectItem>
-                      <SelectItem value="angular-spa">Angular SPA</SelectItem>
-                      <SelectItem value="ecommerce">E-Commerce</SelectItem>
-                      <SelectItem value="admin-dashboard">Admin Dashboard</SelectItem>
-                      <SelectItem value="form-heavy">Form-Heavy App</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-slate-500">
-                    Helps the AI agent understand app-specific patterns
-                  </p>
-                </div>
+                {/*
+                  Application Type dropdown intentionally hidden.
+                  (Backend can still use appType if set elsewhere; we’re just removing this control from the UI.)
+                */}
               </div>
 
               <div className="space-y-2">
@@ -491,6 +595,58 @@ export default function TestEditor() {
           </Card>
         </motion.div>
 
+        {/* Generate from flow (inline) */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.15 }}
+        >
+          <Card className="shadow-sm border-slate-200/70">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-primary" />
+                Generate steps from flow
+              </CardTitle>
+              <p className="text-sm text-slate-500">
+                Describe the flow in plain English. We’ll generate editable steps (no selectors). Then click Save to map them deterministically.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="flowText">Flow description</Label>
+                <Textarea
+                  id="flowText"
+                  value={generateFlowText}
+                  onChange={(e) => setGenerateFlowText(e.target.value)}
+                  rows={4}
+                  placeholder='e.g. "create a test that adds any two products to cart, verifies they are present, and checks out"'
+                  className="font-mono"
+                />
+                <div className="text-xs text-slate-500">
+                  Uses only this app’s <span className="font-mono">app.info</span>. If this test isn’t linked to an app yet, set Application URL and Save once first.
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={onGenerateSteps}
+                  disabled={generating || !(generateFlowText || '').trim() || saveMutation.isPending || runMutation.isPending || isRunning}
+                  className="gap-2 bg-primary hover:bg-primary/90"
+                >
+                  <Sparkles className="h-4 w-4" />
+                  {generating ? 'Generating…' : 'Generate Steps'}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => setGenerateFlowText('')}
+                  disabled={generating || !(generateFlowText || '').length}
+                >
+                  Clear
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </motion.div>
+
         {/* Tabs for Steps and Data */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -498,7 +654,7 @@ export default function TestEditor() {
           transition={{ delay: 0.2 }}
         >
           <Tabs defaultValue="steps" className="w-full">
-            <TabsList className="grid w-full grid-cols-2">
+            <TabsList className="grid w-full grid-cols-2 bg-white/70 backdrop-blur border border-slate-200/70 shadow-sm">
               <TabsTrigger value="steps" className="gap-2">
                 <Layers className="h-4 w-4" />
                 Test Steps ({formData.steps?.length || 0})

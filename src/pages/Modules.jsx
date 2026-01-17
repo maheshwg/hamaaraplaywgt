@@ -73,7 +73,7 @@ export default function Modules() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+    <div className="min-h-screen bg-transparent">
       <div className="max-w-7xl mx-auto p-6 space-y-6">
         {/* Header */}
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
@@ -84,7 +84,7 @@ export default function Modules() {
             </p>
           </div>
           <Link to={createPageUrl('ModuleEditor')}>
-            <Button className="gap-2 bg-indigo-600 hover:bg-indigo-700" disabled={!selectedProjectId}>
+            <Button className="gap-2 bg-primary hover:bg-primary/90" disabled={!selectedProjectId}>
               <Plus className="h-4 w-4" />
               New Module
             </Button>
@@ -119,7 +119,7 @@ export default function Modules() {
                 </p>
                 {!search && (
                   <Link to={createPageUrl('ModuleEditor')}>
-                    <Button className="mt-4 gap-2 bg-indigo-600 hover:bg-indigo-700">
+                    <Button className="mt-4 gap-2 bg-primary hover:bg-primary/90">
                       <Plus className="h-4 w-4" />
                       Create Module
                     </Button>
@@ -146,7 +146,7 @@ export default function Modules() {
                           </div>
                           <Link 
                             to={createPageUrl(`ModuleEditor?id=${module.id}`)}
-                            className="hover:text-indigo-600 transition-colors"
+                            className="hover:text-primary transition-colors"
                           >
                             <CardTitle className="text-base font-semibold">{module.name}</CardTitle>
                           </Link>

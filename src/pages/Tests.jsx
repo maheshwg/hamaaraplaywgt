@@ -292,7 +292,7 @@ export default function Tests() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+    <div className="min-h-screen bg-transparent">
       <div className="max-w-7xl mx-auto p-6 space-y-6">
         {/* Header */}
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
@@ -304,7 +304,7 @@ export default function Tests() {
           </div>
           <Link to={createPageUrl('TestEditor')}>
             <Button 
-              className="gap-2 bg-indigo-600 hover:bg-indigo-700"
+              className="gap-2 bg-primary hover:bg-primary/90"
               disabled={!selectedProjectId}
             >
               <Plus className="h-4 w-4" />
@@ -365,7 +365,7 @@ export default function Tests() {
             <span className="text-sm font-medium text-indigo-700">
               {selectedTests.length} test{selectedTests.length > 1 ? 's' : ''} selected
             </span>
-            <Button onClick={handleRunSelected} size="sm" className="gap-2 bg-indigo-600 hover:bg-indigo-700">
+            <Button onClick={handleRunSelected} size="sm" className="gap-2 bg-primary hover:bg-primary/90">
               <Play className="h-4 w-4" />
               Run Selected
             </Button>
@@ -373,7 +373,7 @@ export default function Tests() {
               onClick={() => setSelectedTests([])} 
               size="sm" 
               variant="ghost"
-              className="text-indigo-600"
+              className="text-primary"
             >
               <X className="h-4 w-4 mr-1" />
               Clear
@@ -412,7 +412,7 @@ export default function Tests() {
             </p>
             {!search && !tagFilter && statusFilter === 'all' && (
               <Link to={createPageUrl('TestEditor')}>
-                <Button className="mt-4 gap-2 bg-indigo-600 hover:bg-indigo-700">
+                <Button className="mt-4 gap-2 bg-primary hover:bg-primary/90">
                   <Plus className="h-4 w-4" />
                   Create Test
                 </Button>

@@ -40,21 +40,49 @@ public class PlaywrightJavaService {
 
     public void ensureStarted() {
         if (tlPage.get() != null) return;
+        try {
+            Playwright pw = Playwright.create();
+            BrowserType bt = resolveBrowserType(pw, browserName);
+            Browser browser = bt.launch(new BrowserType.LaunchOptions().setHeadless(headless));
+            BrowserContext ctx = browser.newContext();
+            Page page = ctx.newPage();
+            page.setDefaultTimeout(timeoutMs);
 
-        Playwright pw = Playwright.create();
-        BrowserType bt = resolveBrowserType(pw, browserName);
-        Browser browser = bt.launch(new BrowserType.LaunchOptions().setHeadless(headless));
-        BrowserContext ctx = browser.newContext();
-        Page page = ctx.newPage();
-        page.setDefaultTimeout(timeoutMs);
+            tlPlaywright.set(pw);
+            tlBrowser.set(browser);
+            tlContext.set(ctx);
+            tlPage.set(page);
 
-        tlPlaywright.set(pw);
-        tlBrowser.set(browser);
-        tlContext.set(ctx);
-        tlPage.set(page);
+            log.info("[PW] Started Playwright Java session (browser={}, headless={}, timeoutMs={})",
+                browserName, headless, timeoutMs);
+            return;
+        } catch (PlaywrightException e) {
+            // This is commonly caused by a corrupted Playwright driver cache, blocked executable (macOS quarantine),
+            // or missing browser binaries. The default exception message is often too generic ("Failed to launch driver"),
+            // so log more context and provide actionable hints.
+            log.error("[PW] Failed to start Playwright Java (browser={}, headless={}, timeoutMs={}). {}",
+                browserName, headless, timeoutMs, e.getMessage(), e);
+            if (e.getCause() != null) {
+                log.error("[PW] Underlying cause: {}", e.getCause().toString(), e.getCause());
+            }
+            for (Throwable sup : e.getSuppressed()) {
+                log.error("[PW] Suppressed: {}", sup.toString(), sup);
+            }
+            log.error("[PW] System: os.name={} os.arch={} java.version={} user.home={}",
+                System.getProperty("os.name"),
+                System.getProperty("os.arch"),
+                System.getProperty("java.version"),
+                System.getProperty("user.home"));
 
-        log.info("[PW] Started Playwright Java session (browser={}, headless={}, timeoutMs={})",
-            browserName, headless, timeoutMs);
+            throw new RuntimeException(
+                "Playwright failed to start (driver launch). Common fixes: "
+                    + "(1) clear Playwright caches under your home directory and retry, "
+                    + "(2) run Playwright browser install for Java (mvn exec:java ... CLI install), "
+                    + "(3) on macOS, ensure the extracted driver is not blocked by quarantine/AV. "
+                    + "See backend logs for the detailed cause.",
+                e
+            );
+        }
     }
 
     public void reset() {

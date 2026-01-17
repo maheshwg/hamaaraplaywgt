@@ -78,7 +78,7 @@ public class JarMethodExecutionService {
         }
       }
 
-      return new InvocationResult(booleanReturnExpected, boolVal);
+      return new InvocationResult(booleanReturnExpected, boolVal, ret);
     } catch (Exception e) {
       throw new RuntimeException("Failed to invoke plugin method " + chosenScreen + "." + m.getName() + ": " + e.getMessage(), e);
     }
@@ -145,7 +145,11 @@ public class JarMethodExecutionService {
     return null;
   }
 
-  public record InvocationResult(boolean booleanReturnExpected, Boolean booleanValue) {}
+  /**
+   * returnValue is the raw reflected return (may be null). For boolean-returning methods,
+   * booleanValue is populated (may be null if method returned null).
+   */
+  public record InvocationResult(boolean booleanReturnExpected, Boolean booleanValue, Object returnValue) {}
 }
 
 

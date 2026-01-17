@@ -748,6 +748,7 @@ public class TestExecutionService {
             || action.equals("select_by_value")
             || action.equals("select_by_label")
             || action.equals("press_key")
+            || action.equals("extract_text")
             || action.equals("call_method");
     }
 
@@ -777,6 +778,17 @@ public class TestExecutionService {
             case "select_by_value" -> playwrightJavaService.selectByValue(step.getSelector(), resolveTemplate(step.getValue(), variables));
             case "select_by_label" -> playwrightJavaService.selectByLabel(step.getSelector(), resolveTemplate(step.getValue(), variables));
             case "press_key" -> playwrightJavaService.press(resolveTemplate(step.getValue(), variables));
+            case "extract_text" -> {
+                String key = normalizeExportKey(step.getValue());
+                if (key == null || key.isBlank()) {
+                    throw new RuntimeException("extract_text requires a variable name in step.value");
+                }
+                String text = playwrightJavaService.textContent(step.getSelector());
+                java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+                out.put(key, text);
+                extracted = out;
+                successMessage = "Captured text into {{" + key + "}}";
+            }
             case "call_method" -> {
                 // selector format: screenName::methodName
                 String sel = step.getSelector();
@@ -785,9 +797,10 @@ public class TestExecutionService {
                 String screenName = parts[0];
                 String methodName = parts[1];
 
-                List<String> rawArgs = storedMethodExecutionService.parseArgsFromStepValue(step.getValue());
+                StoredMethodExecutionService.CallMethodValue cmv = storedMethodExecutionService.parseCallMethodValue(step.getValue());
                 List<String> args = new java.util.ArrayList<>();
-                for (String a : rawArgs) args.add(resolveTemplate(a, variables));
+                for (String a : (cmv != null ? cmv.args : java.util.List.<String>of())) args.add(resolveTemplate(a, variables));
+                String exportKey = cmv != null ? normalizeExportKey(cmv.export) : null;
 
                 if (app.getExecutionMode() == App.ExecutionMode.JAR_PLUGIN) {
                     JarMethodExecutionService.InvocationResult jr =
@@ -797,6 +810,13 @@ public class TestExecutionService {
                     }
                     if (jr != null && jr.booleanReturnExpected() && jr.booleanValue() == null) {
                         throw new UserFacingStepException("Verification returned no result.");
+                    }
+                    if (exportKey != null && !exportKey.isBlank() && jr != null) {
+                        Object val = jr.booleanReturnExpected() ? jr.booleanValue() : jr.returnValue();
+                        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+                        out.put(exportKey, val);
+                        extracted = out;
+                        successMessage = "Stored method result into {{" + exportKey + "}}";
                     }
                 } else {
                     Screen screen = screenRepository.findByApp_IdAndName(app.getId(), screenName)
@@ -818,6 +838,18 @@ public class TestExecutionService {
         }
         log.info("[DET-MAP] Executed mapped action='{}' (stepOrder={})", action, step.getOrder());
         return new ExecOutcome(successMessage, extracted);
+    }
+
+    private static String normalizeExportKey(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        if (s.isEmpty()) return null;
+        // Allow user to pass "{{var}}" or "${var}" as a convenience.
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^\\{\\{([a-zA-Z_][a-zA-Z0-9_]*)\\}\\}$").matcher(s);
+        if (m.matches()) return m.group(1);
+        java.util.regex.Matcher m2 = java.util.regex.Pattern.compile("^\\$\\{([a-zA-Z_][a-zA-Z0-9_]*)\\}$").matcher(s);
+        if (m2.matches()) return m2.group(1);
+        return s;
     }
 
     private static Map<String, Object> mergeExtracted(Map<String, Object> a, Map<String, Object> b) {
@@ -898,6 +930,7 @@ public class TestExecutionService {
             case "select_by_value" -> "Selected value successfully";
             case "select_by_label" -> "Selected value successfully";
             case "press_key" -> "Key pressed successfully";
+            case "extract_text" -> "Captured text successfully";
             case "call_method" -> "Step passed";
             default -> "Step passed";
         };

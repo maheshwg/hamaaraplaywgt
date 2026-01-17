@@ -651,19 +651,52 @@ public class StoredMethodExecutionService {
     }
 
     public List<String> parseArgsFromStepValue(String value) {
-        if (value == null) return List.of();
+        return parseCallMethodValue(value).args;
+    }
+
+    /**
+     * Parses call_method step.value.
+     *
+     * Supported formats:
+     * - JSON array: ["arg1","arg2"]
+     * - CSV (back-compat): "arg1,arg2"
+     * - Single string: "arg1"
+     * - JSON object (new): {"args":["arg1"],"export":"varName"}
+     */
+    public CallMethodValue parseCallMethodValue(String value) {
+        if (value == null) return new CallMethodValue(List.of(), null);
         String v = value.trim();
-        if (v.isEmpty()) return List.of();
-        // If it's JSON array, parse it; otherwise treat it as a single arg string.
-        if (v.startsWith("[") && v.endsWith("]")) {
+        if (v.isEmpty()) return new CallMethodValue(List.of(), null);
+
+        // JSON object: {"args":[...], "export":"x"}
+        if (v.startsWith("{") && v.endsWith("}")) {
             try {
-                return objectMapper.readValue(v, new TypeReference<List<String>>() {});
+                @SuppressWarnings("unchecked")
+                Map<String, Object> obj = objectMapper.readValue(v, Map.class);
+                Object argsObj = obj.get("args");
+                List<String> args = new java.util.ArrayList<>();
+                if (argsObj instanceof List<?> list) {
+                    for (Object o : list) args.add(o != null ? String.valueOf(o) : "");
+                }
+                String export = obj.get("export") != null ? String.valueOf(obj.get("export")).trim() : null;
+                if (export != null && export.isBlank()) export = null;
+                return new CallMethodValue(args, export);
             } catch (Exception ignored) {
                 // fall through
             }
         }
-        // Back-compat: many older mapped steps stored args as a single comma-separated string.
-        // Example: "standard_user,secret_sauce"
+
+        // JSON array: ["a","b"]
+        if (v.startsWith("[") && v.endsWith("]")) {
+            try {
+                List<String> args = objectMapper.readValue(v, new TypeReference<List<String>>() {});
+                return new CallMethodValue(args != null ? args : List.of(), null);
+            } catch (Exception ignored) {
+                // fall through
+            }
+        }
+
+        // CSV: "a,b"
         if (v.contains(",")) {
             String[] parts = v.split(",");
             java.util.ArrayList<String> out = new java.util.ArrayList<>();
@@ -671,9 +704,19 @@ public class StoredMethodExecutionService {
                 String t = p.trim();
                 if (!t.isEmpty()) out.add(t);
             }
-            if (!out.isEmpty()) return out;
+            if (!out.isEmpty()) return new CallMethodValue(out, null);
         }
-        return List.of(v);
+
+        return new CallMethodValue(List.of(v), null);
+    }
+
+    public static class CallMethodValue {
+        public final List<String> args;
+        public final String export;
+        public CallMethodValue(List<String> args, String export) {
+            this.args = args != null ? args : List.of();
+            this.export = export;
+        }
     }
 
     public static class StoredMethodResult {

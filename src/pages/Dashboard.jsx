@@ -102,7 +102,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+    <div className="min-h-screen bg-transparent">
       <div className="max-w-7xl mx-auto p-6 space-y-8">
         {/* Header */}
         <motion.div 
@@ -118,7 +118,7 @@ export default function Dashboard() {
           </div>
           <div className="flex gap-3">
             <Link to={createPageUrl('TestEditor')}>
-              <Button className="gap-2 bg-indigo-600 hover:bg-indigo-700" disabled={!selectedProjectId}>
+              <Button className="gap-2 bg-primary hover:bg-primary/90" disabled={!selectedProjectId}>
                 <Plus className="h-4 w-4" />
                 New Test
               </Button>
@@ -179,7 +179,7 @@ export default function Dashboard() {
               <CardHeader className="flex flex-row items-center justify-between">
                 <CardTitle className="text-lg font-semibold">Recent Runs</CardTitle>
                 <Link to={createPageUrl('Reports')}>
-                  <Button variant="ghost" size="sm" className="gap-1 text-indigo-600">
+                  <Button variant="ghost" size="sm" className="gap-1 text-primary">
                     View All <ArrowRight className="h-4 w-4" />
                   </Button>
                 </Link>

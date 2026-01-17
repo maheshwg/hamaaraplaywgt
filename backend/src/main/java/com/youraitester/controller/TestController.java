@@ -4,7 +4,9 @@ import com.youraitester.model.Test;
 import com.youraitester.model.TestStep;
 import com.youraitester.model.TestDataset;
 import com.youraitester.repository.TestRepository;
+import com.youraitester.repository.app.AppRepository;
 import com.youraitester.service.AppResolutionService;
+import com.youraitester.service.FlowTestGenerationService;
 import com.youraitester.service.TestStepMappingService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -15,6 +17,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/tests")
@@ -24,8 +27,10 @@ import java.util.List;
 public class TestController {
     
     private final TestRepository testRepository;
+    private final AppRepository appRepository;
     private final AppResolutionService appResolutionService;
     private final TestStepMappingService testStepMappingService;
+    private final FlowTestGenerationService flowTestGenerationService;
     
     @GetMapping
     public ResponseEntity<List<Test>> getAllTests(@RequestParam(value = "projectId", required = false) String projectId) {
@@ -234,6 +239,76 @@ public class TestController {
             id, saved.getId(), saved.getProjectId());
         
         return ResponseEntity.ok(sanitizeTestForResponse(saved, isSuperAdmin()));
+    }
+
+    /**
+     * Authoring-time helper: generate English steps from a natural-language flow.
+     * Uses ONLY App.info (no screens/elements/method registry) per current approach.
+     *
+     * Body:
+     * {
+     *   "appId": 15,            // optional if appName provided
+     *   "appName": "saucedemo", // optional if appId provided
+     *   "appUrl": "https://www.saucedemo.com", // optional; resolves app by URL when appId/appName missing
+     *   "flowText": "create a test that adds any two products..."
+     * }
+     */
+    @PostMapping("/generate-from-flow")
+    public ResponseEntity<?> generateFromFlow(@RequestBody Map<String, Object> body) {
+        if (body == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "bad_request", "message", "body is required"));
+        }
+        Object flowObj = body.get("flowText");
+        String flowText = flowObj != null ? String.valueOf(flowObj) : null;
+        if (flowText == null || flowText.trim().isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "bad_request", "message", "flowText is required"));
+        }
+
+        Long appId = null;
+        if (body.get("appId") != null) {
+            try {
+                appId = Long.valueOf(String.valueOf(body.get("appId")));
+            } catch (Exception ignored) {}
+        }
+        String appName = body.get("appName") != null ? String.valueOf(body.get("appName")).trim() : null;
+        String appUrl = body.get("appUrl") != null ? String.valueOf(body.get("appUrl")).trim() : null;
+        if (appId == null && (appName == null || appName.isBlank()) && (appUrl == null || appUrl.isBlank())) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "error", "bad_request",
+                "message", "appId, appName, or appUrl is required"
+            ));
+        }
+
+        var app = (appId != null)
+            ? appRepository.findById(appId).orElse(null)
+            : ((appName != null && !appName.isBlank())
+                ? appRepository.findByNameIgnoreCase(appName).orElse(null)
+                : null);
+        if (app == null && appUrl != null && !appUrl.isBlank()) {
+            app = appResolutionService.resolveAppFromUrl(appUrl).orElse(null);
+        }
+        if (app == null) {
+            return ResponseEntity.status(404).body(Map.of(
+                "error", "not_found",
+                "message", "App not found"
+            ));
+        }
+
+        try {
+            FlowTestGenerationService.GeneratedDraft draft = flowTestGenerationService.generateDraft(app, flowText);
+            return ResponseEntity.ok(Map.of(
+                "appId", app.getId(),
+                "appName", app.getName(),
+                "testName", draft.testName,
+                "steps", draft.steps
+            ));
+        } catch (Exception e) {
+            log.warn("generate-from-flow failed (appId={} appName='{}'): {}", app.getId(), app.getName(), e.getMessage());
+            return ResponseEntity.status(500).body(Map.of(
+                "error", "internal_server_error",
+                "message", e.getMessage()
+            ));
+        }
     }
 
     private boolean isSuperAdmin() {

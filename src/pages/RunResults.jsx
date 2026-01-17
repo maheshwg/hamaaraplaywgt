@@ -319,7 +319,7 @@ export default function RunResults() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-6">
+      <div className="min-h-screen bg-transparent p-6">
         <div className="max-w-7xl mx-auto space-y-6">
           <Skeleton className="h-10 w-48" />
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -336,18 +336,18 @@ export default function RunResults() {
     const totalSteps = selectedRun.step_results?.length || 0;
 
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+      <div className="min-h-screen bg-transparent">
         <div className="max-w-4xl mx-auto p-6 space-y-6">
           <motion.div 
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             className="flex items-center gap-2 text-sm text-slate-500"
           >
-            <Link to={createPageUrl('RunResults')} className="hover:text-indigo-600">Results</Link>
+            <Link to={createPageUrl('RunResults')} className="hover:text-primary">Results</Link>
             <ChevronRight className="h-4 w-4" />
             <Link 
               to={createPageUrl(`RunResults?batchId=${selectedBatchId}`)} 
-              className="hover:text-indigo-600"
+              className="hover:text-primary"
             >
               {selectedBatch?.runName || selectedBatchId.slice(0, 15)}
             </Link>
@@ -463,14 +463,14 @@ export default function RunResults() {
     const passedCount = selectedBatch.runs.filter(r => r.status === 'passed').length;
 
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+      <div className="min-h-screen bg-transparent">
         <div className="max-w-5xl mx-auto p-6 space-y-6">
           <motion.div 
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             className="flex items-center gap-2 text-sm text-slate-500"
           >
-            <Link to={createPageUrl('RunResults')} className="hover:text-indigo-600">Results</Link>
+            <Link to={createPageUrl('RunResults')} className="hover:text-primary">Results</Link>
             <ChevronRight className="h-4 w-4" />
             <span className="text-slate-700">{selectedBatch?.runName || `Run ${selectedBatchId.slice(0, 15)}`}</span>
           </motion.div>
@@ -484,7 +484,7 @@ export default function RunResults() {
                 <div className="flex items-center justify-between">
                   <div>
                     <CardTitle className="text-xl flex items-center gap-2">
-                      <Play className="h-5 w-5 text-indigo-600" />
+                      <Play className="h-5 w-5 text-primary" />
                       {selectedBatch?.runName || `Run: ${selectedBatchId.slice(0, 15)}`}
                     </CardTitle>
                     <p className="text-sm text-slate-500 mt-1">
@@ -641,7 +641,7 @@ export default function RunResults() {
 
   // View: All batches/runs list
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+    <div className="min-h-screen bg-transparent">
       <div className="max-w-5xl mx-auto p-6 space-y-6">
         <motion.div 
           initial={{ opacity: 0, y: -20 }}
@@ -719,7 +719,7 @@ export default function RunResults() {
             <h3 className="text-lg font-medium text-slate-700">No test runs yet</h3>
             <p className="text-slate-500 mt-1">Run some tests to see results here</p>
             <Link to={createPageUrl('Tests')}>
-              <Button className="mt-4 gap-2 bg-indigo-600 hover:bg-indigo-700">
+              <Button className="mt-4 gap-2 bg-primary hover:bg-primary/90">
                 <Play className="h-4 w-4" />
                 Go to Tests
               </Button>

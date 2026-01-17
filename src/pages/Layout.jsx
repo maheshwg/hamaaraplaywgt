@@ -94,6 +94,19 @@ export default function Layout({ children, currentPageName }) {
     return () => events.forEach((ev) => window.removeEventListener(ev, touch));
   }, [isLandingPage]);
 
+  // App-only color theme: apply a root class so Radix portals (dropdowns/modals) inherit it too.
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const el = document.documentElement;
+    if (!el) return;
+    if (!isLandingPage) el.classList.add('app-theme');
+    else el.classList.remove('app-theme');
+    return () => {
+      // In case Layout unmounts or route switches
+      el.classList.remove('app-theme');
+    };
+  }, [isLandingPage]);
+
   const handleLogout = () => {
     Auth.logout();
   };
@@ -365,11 +378,11 @@ export default function Layout({ children, currentPageName }) {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-slate-50 to-violet-50">
       {/* Mobile Header */}
       <div className="lg:hidden fixed top-0 left-0 right-0 z-50 bg-white border-b px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-indigo-600">
+          <div className="p-2 rounded-lg bg-primary shadow-sm">
             <FlaskConical className="h-5 w-5 text-white" />
           </div>
           <span className="font-bold text-slate-900">YourAITester</span>

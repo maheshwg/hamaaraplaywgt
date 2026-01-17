@@ -110,6 +110,29 @@ button:focus-visible {
     --sidebar-border: 220 13% 91%;
     --sidebar-ring: 217.2 91.2% 59.8%;
   }
+  /**
+   * App-only theme (indigo/violet). Applied at runtime by Layout.jsx on app pages
+   * so it does NOT affect the marketing/landing site.
+   */
+  .app-theme {
+    /* Primary brand */
+    --primary: 243 75% 59%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 243 75% 59%;
+
+    /* Slightly more colorful secondary surfaces */
+    --secondary: 230 65% 97%;
+    --secondary-foreground: 243 75% 24%;
+    --accent: 235 70% 96%;
+    --accent-foreground: 243 75% 24%;
+
+    /* Sidebar tokens */
+    --sidebar-primary: 243 75% 59%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 235 70% 96%;
+    --sidebar-accent-foreground: 243 75% 24%;
+    --sidebar-ring: 243 75% 59%;
+  }
   .dark {
     --background: 0 0% 3.9%;
     --foreground: 0 0% 98%;

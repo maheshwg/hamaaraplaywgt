@@ -201,12 +201,25 @@ public class TestStepMappingService {
             }
             step.setType("call_method");
             step.setSelector(mapped.screen + "::" + mapped.target);
-            // Prefer args[] for method calls; store as JSON array in step.value (back-compat: fall back to value)
+            // Prefer args[] for method calls.
+            // If user explicitly requested storing the return value, persist as JSON object:
+            //   {"args":[...],"export":"varName"}
             try {
                 if (mapped.args != null && !mapped.args.isEmpty()) {
-                    step.setValue(objectMapper.writeValueAsString(mapped.args));
+                    String export = normalizeExport(mapped.export);
+                    if (export != null) {
+                        step.setValue(objectMapper.writeValueAsString(Map.of("args", mapped.args, "export", export)));
+                    } else {
+                        step.setValue(objectMapper.writeValueAsString(mapped.args));
+                    }
                 } else {
-                    step.setValue(mapped.value);
+                    // Back-compat: keep single-arg in value, but still allow export if provided
+                    String export = normalizeExport(mapped.export);
+                    if (export != null && mapped.value != null) {
+                        step.setValue(objectMapper.writeValueAsString(Map.of("args", List.of(mapped.value), "export", export)));
+                    } else {
+                        step.setValue(mapped.value);
+                    }
                 }
             } catch (Exception e) {
                 step.setValue(mapped.value);
@@ -252,6 +265,17 @@ public class TestStepMappingService {
         log.info("[MAP-LLM] Mapped element action. order={} action={} screen='{}' element='{}' selector='{}' value={}",
             step.getOrder(), action, mapped.screen, resolvedElementName != null ? resolvedElementName : mapped.target, selector,
             valueForLog(mapped.target, mapped.value));
+    }
+
+    private static String normalizeExport(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        if (s.isEmpty()) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^\\{\\{([a-zA-Z_][a-zA-Z0-9_]*)\\}\\}$").matcher(s);
+        if (m.matches()) return m.group(1);
+        java.util.regex.Matcher m2 = java.util.regex.Pattern.compile("^\\$\\{([a-zA-Z_][a-zA-Z0-9_]*)\\}$").matcher(s);
+        if (m2.matches()) return m2.group(1);
+        return s;
     }
 
     private LlmMapped tryMapWithLlm(App app,
@@ -446,17 +470,21 @@ public class TestStepMappingService {
         StringBuilder sb = new StringBuilder();
         sb.append("Map the instruction to a deterministic action.\n");
         sb.append("Return STRICT JSON with this schema:\n");
-        sb.append("{\"action\":\"fill|click|select_by_value|select_by_label|hover|press_key|navigate|call_method\",");
+        sb.append("{\"action\":\"fill|click|select_by_value|select_by_label|hover|press_key|navigate|call_method|extract_text\",");
         sb.append("\"screen\":\"<one of candidate screens>\",");
         sb.append("\"targetType\":\"element|method|none\",");
         sb.append("\"target\":\"<exact elementName or methodName>\",");
         sb.append("\"value\":\"<string or null>\",");
-        sb.append("\"args\":[\"<string>\", ...]}\n\n");
+        sb.append("\"args\":[\"<string>\", ...],");
+        sb.append("\"export\":\"<string or null>\"}\n\n");
 
         sb.append("Rules:\n");
         sb.append("- If instruction is navigation, action=navigate, targetType=none, target=null, value=url.\n");
         sb.append("- If instruction implies calling a stored method (e.g., 'add to cart ...', 'login with ...'), use action=call_method and targetType=method.\n");
         sb.append("- For call_method, put arguments in args[] (in order). value can be null.\n");
+        sb.append("- If the user explicitly asks to store the result (e.g. 'store ... as {{price}}'), set export=\"price\".\n");
+        sb.append("- Only set export when the user explicitly provides a variable name.\n");
+        sb.append("- If instruction asks to capture/store text from an element for later reuse, use action=extract_text, targetType=element, and set value to the variable name (WITHOUT braces). Example: value=\"price1\".\n");
         sb.append("- target must match EXACTLY one of the provided names for that screen.\n");
         sb.append("- Prefer lastScreen when it makes sense.\n\n");
 
@@ -514,6 +542,11 @@ public class TestStepMappingService {
         public String target;
         public String value;
         public List<String> args;
+        /**
+         * Optional: store the step output into this variable name (no braces).
+         * Used for call_method return values (JAR_PLUGIN) and for extract_text.
+         */
+        public String export;
     }
 
     private Match resolveAcrossScreens(List<Screen> screens, String elementFromStep, String lastScreen) {

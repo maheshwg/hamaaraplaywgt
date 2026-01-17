@@ -136,7 +136,7 @@ export default function ModuleEditor() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+    <div className="min-h-screen bg-transparent">
       <div className="max-w-3xl mx-auto p-6 space-y-6">
         {/* Header */}
         <motion.div 
@@ -167,7 +167,7 @@ export default function ModuleEditor() {
           <Button 
             onClick={handleSave}
             disabled={saveMutation.isPending || !formData.name}
-            className="gap-2 bg-indigo-600 hover:bg-indigo-700"
+            className="gap-2 bg-primary hover:bg-primary/90"
           >
             <Save className="h-4 w-4" />
             {saveMutation.isPending ? 'Saving...' : 'Save Module'}

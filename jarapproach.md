@@ -115,6 +115,34 @@ If the plugin provides `Locator element(String name)`:
 - `select_by_label`: `locator.selectOption(new SelectOption().setLabel(label))`
 - `select_by_value`: `locator.selectOption(value)` (value) or `new SelectOption().setValue(...)`
 
+### Code Flow - added by me
+How the JAR approach uses “Screens” (Apps)
+Today, JAR execution does not use the DB App.screens registry to run methods. Instead:
+Source of truth for screens/methods (JAR mode): the plugin JAR via AppPlugin
+getScreenNames() → which screens exist
+getScreenClass(screenName) → which Java class represents that screen
+Runtime calls instantiate that class and invoke the method via reflection
+Where DB screens are still used
+For non-call_method deterministic steps (click/fill/hover/select...): we still use the DB screen elements (ScreenElement) to resolve selectors.
+For screen inference (“which screen am I on?”): we still use app.info + existing flow to infer screen name.
+What happens at runtime for a call_method step (JAR mode)
+In TestExecutionService, if app.executionMode == JAR_PLUGIN:
+A call_method step with selector like products::sortBy:
+resolves screenName=products, methodName=sortBy
+loads plugin jar (ServiceLoader)
+plugin.getScreenClass("products")
+instantiate screen object (prefer (Page) constructor)
+reflect-invoke sortBy(args...)
+Practical implication
+If you want validation/mapping to “see” a screen, it must be in AppPlugin.getScreenNames().
+The DB screen registry is still valuable for element-level deterministic actions and for backward compatibility—but JAR method execution itself is plugin-driven.
+so the method JSON that are shown for screens are not being used in jar approach, right
+
+Correct — in JAR_PLUGIN mode, the DB-stored screen methods JSON (the Screen.methods / ScreenMethod.methodBody you see under screens) is not used to execute call_method.
+In JAR_PLUGIN: call_method runs via the plugin jar (AppPlugin → screen class → reflection invoke).
+In DB_METHOD_BODY: call_method runs via the stored method JSON + StoredMethodExecutionService (the custom interpreter).
+The DB screen elements can still be used for non-call_method actions (click/fill/etc.), but the stored methods JSON is bypassed in jar mode.
+
 ### 7) Logging and reporting hooks
 
 In plugin methods you can do normal Java logging:

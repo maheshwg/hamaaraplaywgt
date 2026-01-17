@@ -11,7 +11,13 @@ import { Auth } from '@/api/auth.js';
 
 export default function StepEditor({ steps, onChange, modules = [], dataColumns = [], showMapped = false }) {
   const [newStepType, setNewStepType] = useState('action');
-  const isSuperAdmin = Auth.getRole() === 'SUPER_ADMIN';
+  const role = Auth.getRole() || '';
+  // Be tolerant: backend/clients sometimes store roles as ROLE_SUPER_ADMIN vs SUPER_ADMIN.
+  const isSuperAdmin =
+    role === 'SUPER_ADMIN' ||
+    role === 'ROLE_SUPER_ADMIN' ||
+    role === 'VENDOR_ADMIN' ||
+    role === 'ROLE_VENDOR_ADMIN';
   const canShowMapped = isSuperAdmin && showMapped;
 
   // Normalize steps to ensure they have required fields
@@ -140,16 +146,26 @@ export default function StepEditor({ steps, onChange, modules = [], dataColumns 
                           >
                             <GripVertical className="h-5 w-5" />
                           </div>
-                          <div className="flex-shrink-0 w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-semibold text-sm">
-                            {index + 1}
+                          <div className="flex-shrink-0 flex items-center gap-2">
+                            <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-semibold text-sm">
+                              {index + 1}
+                            </div>
+                            <div
+                              className={`w-8 h-8 rounded-lg flex items-center justify-center border ${
+                                step.display_type === 'module'
+                                  ? 'bg-amber-50 border-amber-200 text-amber-700'
+                                  : 'bg-sky-50 border-sky-200 text-sky-700'
+                              }`}
+                              title={step.display_type === 'module' ? 'Module step' : 'Action step'}
+                            >
+                              {step.display_type === 'module' ? (
+                                <Package className="h-4 w-4" />
+                              ) : (
+                                <Type className="h-4 w-4" />
+                              )}
+                            </div>
                           </div>
                           <div className="flex-1 space-y-2">
-                            <div className="flex items-center gap-2">
-                              <Badge variant={step.display_type === 'module' ? 'secondary' : 'outline'} className="text-xs">
-                                {step.display_type === 'module' ? <Package className="h-3 w-3 mr-1" /> : <Type className="h-3 w-3 mr-1" />}
-                                {step.display_type === 'module' ? 'Module' : 'Action'}
-                              </Badge>
-                            </div>
                             {step.display_type === 'action' ? (
                               <div className="space-y-1">
                                 <Textarea
