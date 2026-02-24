@@ -88,10 +88,6 @@ public class JavaLocatorImportService {
             req.setSelector(selector);
             req.setFrameSelector(null);
 
-            String elementType = inferElementType(selector);
-            req.setElementType(elementType);
-            req.setActionsSupported(inferActions(elementType));
-
             out.add(req);
         }
 
@@ -102,49 +98,9 @@ public class JavaLocatorImportService {
         return out;
     }
 
-    private String inferElementType(String selector) {
-        if (selector == null) return "other";
-        String s = selector.trim().toLowerCase();
-        if (s.startsWith("textarea")) return "textarea";
-        if (s.startsWith("select")) return "select";
-        if (s.startsWith("button")) return "button";
-        if (s.startsWith("table")) return "table";
-        if (s.startsWith("svg") || s.contains("svg")) return "svg";
-        if (s.startsWith("input")) {
-            if (s.contains("type='radio'") || s.contains("type=\"radio\"")) return "radio";
-            if (s.contains("type='checkbox'") || s.contains("type=\"checkbox\"")) return "checkbox";
-            if (s.contains("type='file'") || s.contains("type=\"file\"")) return "file";
-            if (s.contains("type='range'") || s.contains("type=\"range\"")) return "range";
-            return "input";
-        }
-        return "other";
-    }
-
-    private List<String> inferActions(String elementType) {
-        List<String> a = new ArrayList<>();
-        if (elementType == null) return a;
-        switch (elementType) {
-            case "input", "textarea" -> {
-                a.add("fill");
-                a.add("click");
-            }
-            case "select" -> {
-                a.add("select_by_value");
-                a.add("click");
-            }
-            case "button", "table" -> a.add("click");
-            case "radio", "checkbox" -> {
-                a.add("click");
-                a.add("check");
-            }
-            case "file" -> a.add("set_input_files");
-            default -> {
-                a.add("click");
-                a.add("hover");
-            }
-        }
-        return a;
-    }
+    // NOTE:
+    // We intentionally do NOT infer/store elementType or actionsSupported. The element registry is kept minimal:
+    // elementName + selectorType + selector (+ optional frameSelector).
 }
 
 

@@ -1,5 +1,7 @@
 package com.youraitester.model;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -64,12 +66,18 @@ public class Test {
     private String status; // active, archived, draft
     
     @Column(name = "run_count")
+    @JsonProperty("run_count")
+    @JsonAlias({"runCount"})
     private Integer runCount = 0;
     
     @Column(name = "last_run_date")
+    @JsonProperty("last_run_date")
+    @JsonAlias({"lastRunDate"})
     private LocalDateTime lastRunDate;
     
     @Column(name = "last_run_status")
+    @JsonProperty("last_run_status")
+    @JsonAlias({"lastRunStatus"})
     private String lastRunStatus; // passed, failed, running
     
     @ElementCollection(fetch = FetchType.EAGER)

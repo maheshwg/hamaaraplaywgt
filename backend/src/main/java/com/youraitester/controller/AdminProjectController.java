@@ -27,14 +27,34 @@ public class AdminProjectController {
     @GetMapping
     @Transactional(readOnly = true)
     public ResponseEntity<List<Map<String, Object>>> listAllProjects() {
-        List<Project> projects = projectRepository.findAll();
-        List<Map<String, Object>> out = projects.stream().map(p -> {
+        // Use a native projection to avoid Hibernate hydration errors when DB contains bad tenant references.
+        List<Object[]> rows = projectRepository.findAllProjectRowsWithTenant();
+        List<Map<String, Object>> out = rows.stream().map(r -> {
             Map<String, Object> m = new HashMap<>();
-            m.put("id", p.getId());
-            m.put("name", p.getName());
-            m.put("description", p.getDescription());
-            m.put("tenantId", p.getTenant() != null ? p.getTenant().getId() : null);
-            m.put("tenantName", p.getTenant() != null ? p.getTenant().getName() : null);
+            m.put("id", r[0]);
+            m.put("name", r[1]);
+            m.put("description", r[2]);
+            m.put("tenantId", r[3]);
+            m.put("tenantName", r[4]);
+            return m;
+        }).collect(Collectors.toList());
+        return ResponseEntity.ok(out);
+    }
+
+    /**
+     * SUPER_ADMIN flow: choose tenant (client) first, then list projects within that tenant.
+     * Example: GET /api/admin/projects?tenantId=123
+     */
+    @GetMapping(params = "tenantId")
+    @Transactional(readOnly = true)
+    public ResponseEntity<List<Map<String, Object>>> listProjectsForTenant(@RequestParam Long tenantId) {
+        List<Object[]> rows = projectRepository.findProjectRowsByTenantId(tenantId);
+        List<Map<String, Object>> out = rows.stream().map(r -> {
+            Map<String, Object> m = new HashMap<>();
+            m.put("id", r[0]);
+            m.put("name", r[1]);
+            m.put("description", r[2]);
+            m.put("tenantId", r[3]);
             return m;
         }).collect(Collectors.toList());
         return ResponseEntity.ok(out);

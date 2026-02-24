@@ -55,9 +55,29 @@ public class JarMethodExecutionService {
       throw new IllegalStateException("Plugin createScreen returned unexpected type. expected=" + screenClass + " got=" + screenObj.getClass());
     }
 
-    Method m = findCompatibleMethod(screenClass, methodName, args != null ? args.size() : 0);
+    int providedArgCount = (args != null ? args.size() : 0);
+    Method m = findCompatibleMethod(screenClass, methodName, providedArgCount);
     if (m == null) {
-      throw new IllegalArgumentException("Method not found on screen '" + chosenScreen + "': " + methodName + " (argCount=" + (args != null ? args.size() : 0) + ")");
+      // Best-effort fallback: if there's exactly one method with this name (ignoring case),
+      // allow calling it even if argCount doesn't match by padding missing args with defaults.
+      List<Method> candidates = findMethodsByName(screenClass, methodName);
+      if (candidates.size() == 1) {
+        m = candidates.get(0);
+        log.warn("[JAR] Method argCount mismatch; falling back to name-only match. screen='{}' method='{}' providedArgCount={} expectedArgCount={}",
+            chosenScreen, m.getName(), providedArgCount, m.getParameterCount());
+      } else if (!candidates.isEmpty()) {
+        StringBuilder sb = new StringBuilder();
+        for (Method cm : candidates) {
+          sb.append(cm.getName()).append("(").append(cm.getParameterCount()).append(" params, returns ")
+              .append(cm.getReturnType() != null ? cm.getReturnType().getSimpleName() : "?").append("); ");
+        }
+        throw new IllegalArgumentException(
+            "Method not found on screen '" + chosenScreen + "': " + methodName
+                + " (argCount=" + providedArgCount + "). Available overloads: " + sb
+        );
+      } else {
+        throw new IllegalArgumentException("Method not found on screen '" + chosenScreen + "': " + methodName + " (argCount=" + providedArgCount + ")");
+      }
     }
 
     Object[] invokeArgs = coerceArgs(m.getParameterTypes(), args != null ? args : List.of());
@@ -115,6 +135,18 @@ public class JarMethodExecutionService {
       break;
     }
     return best;
+  }
+
+  private List<Method> findMethodsByName(Class<?> cls, String name) {
+    List<Method> out = new ArrayList<>();
+    if (cls == null || name == null) return out;
+    String target = name.trim();
+    for (Method m : cls.getMethods()) {
+      if (m == null) continue;
+      if (!m.getName().equalsIgnoreCase(target)) continue;
+      out.add(m);
+    }
+    return out;
   }
 
   private Object[] coerceArgs(Class<?>[] paramTypes, List<String> raw) {

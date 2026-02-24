@@ -59,6 +59,30 @@ public class TestExecutionService {
     private final TestStepMappingService testStepMappingService;
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final int LOG_VALUE_MAX_CHARS = 120;
+
+    private void updateTestLastRunMetadata(String testId, String status, LocalDateTime when, boolean incrementRunCount) {
+        try {
+            if (testId == null || testId.isBlank()) return;
+            Test t = testRepository.findById(testId).orElse(null);
+            if (t == null) return;
+
+            if (incrementRunCount) {
+                Integer rc = t.getRunCount();
+                t.setRunCount((rc == null ? 0 : rc) + 1);
+            }
+            if (when != null) {
+                t.setLastRunDate(when);
+            }
+            if (status != null && !status.isBlank()) {
+                t.setLastRunStatus(status);
+            }
+
+            testRepository.save(t);
+            log.info("[TEST-META] Updated Test metadata. testId={} status={} when={} runCount={}", testId, t.getLastRunStatus(), t.getLastRunDate(), t.getRunCount());
+        } catch (Exception e) {
+            log.warn("[TEST-META] Failed to update Test metadata. testId={} status={} err={}", testId, status, e.getMessage());
+        }
+    }
     
     @Async
     @org.springframework.transaction.annotation.Transactional
@@ -131,6 +155,9 @@ public class TestExecutionService {
             testRun = testRunRepository.save(testRun);
             log.info("Saved TestRun id={}, batchId={}", testRun.getId(), testRun.getBatchId());
 
+            // Mark test as running immediately (so Tests list can reflect current state)
+            updateTestLastRunMetadata(testId, "running", LocalDateTime.now(), false);
+
             // Reset browser context to clear cookies and session data before starting test
             // DISABLED: Resetting browser context causes MCP server to crash
             // log.info("Resetting browser context before test execution");
@@ -181,6 +208,9 @@ public class TestExecutionService {
             
             testRun.setVariables(variables);
             // Save testRun to persist variables JSON before executing steps
+            if (testRun.getStatus() == null || testRun.getStatus().isBlank()) {
+                testRun.setStatus("running");
+            }
             testRun = testRunRepository.save(testRun);
             log.info("Saved testRun with {} variables. Variables JSON: {}", variables.size(), testRun.getVariablesJson());
             
@@ -499,6 +529,22 @@ public class TestExecutionService {
                 }
             }
         } finally {
+            // Always persist last-run metadata on the Test record, even on early returns above.
+            // (Many code paths return early after saving testRun, skipping the "happy path" update.)
+            try {
+                if (testRun != null) {
+                    String finalStatus = testRun.getStatus() != null && !testRun.getStatus().isBlank()
+                        ? testRun.getStatus()
+                        : "running";
+                    LocalDateTime when = testRun.getCompletedAt() != null
+                        ? testRun.getCompletedAt()
+                        : (testRun.getStartedAt() != null ? testRun.getStartedAt() : LocalDateTime.now());
+                    updateTestLastRunMetadata(testId, finalStatus, when, true);
+                }
+            } catch (Exception e) {
+                log.warn("[TEST-META] Failed in finally metadata update. testId={} err={}", testId, e.getMessage());
+            }
+
             // Always close the Playwright MCP browser/process for this test execution thread.
             // This guarantees cleanup when the last step completes OR when any step fails/throws.
             try {
@@ -770,20 +816,41 @@ public class TestExecutionService {
             step.getValue() != null ? "\"" + step.getValue() + "\"" : "null");
         String successMessage = null;
         Map<String, Object> extracted = Map.of();
+        // Support non-css selectors encoded as "<selectorType>::<selector>" (e.g., "getByLabel::Password").
+        String rawSel = step.getSelector();
+        String selType = null;
+        String selValue = rawSel;
+        if (rawSel != null && rawSel.contains("::")) {
+            String[] p = rawSel.split("::", 2);
+            if (p.length == 2 && p[0] != null && !p[0].isBlank()) {
+                selType = p[0];
+                selValue = p[1];
+            }
+        }
         switch (action) {
             case "navigate" -> playwrightJavaService.navigate(resolveTemplate(step.getValue(), variables));
-            case "fill" -> playwrightJavaService.fill(step.getSelector(), resolveTemplate(step.getValue(), variables));
-            case "click" -> playwrightJavaService.click(step.getSelector());
-            case "hover" -> playwrightJavaService.hover(step.getSelector());
-            case "select_by_value" -> playwrightJavaService.selectByValue(step.getSelector(), resolveTemplate(step.getValue(), variables));
-            case "select_by_label" -> playwrightJavaService.selectByLabel(step.getSelector(), resolveTemplate(step.getValue(), variables));
+            case "fill" -> {
+                String v = resolveTemplate(step.getValue(), variables);
+                if ("getByLabel".equalsIgnoreCase(selType)) playwrightJavaService.fillByLabel(selValue, v);
+                else playwrightJavaService.fill(selValue, v);
+            }
+            case "click" -> {
+                if ("getByLabel".equalsIgnoreCase(selType)) playwrightJavaService.clickByLabel(selValue);
+                else playwrightJavaService.click(selValue);
+            }
+            case "hover" -> {
+                if ("getByLabel".equalsIgnoreCase(selType)) playwrightJavaService.hoverByLabel(selValue);
+                else playwrightJavaService.hover(selValue);
+            }
+            case "select_by_value" -> playwrightJavaService.selectByValue(selValue, resolveTemplate(step.getValue(), variables));
+            case "select_by_label" -> playwrightJavaService.selectByLabel(selValue, resolveTemplate(step.getValue(), variables));
             case "press_key" -> playwrightJavaService.press(resolveTemplate(step.getValue(), variables));
             case "extract_text" -> {
                 String key = normalizeExportKey(step.getValue());
                 if (key == null || key.isBlank()) {
                     throw new RuntimeException("extract_text requires a variable name in step.value");
                 }
-                String text = playwrightJavaService.textContent(step.getSelector());
+                String text = playwrightJavaService.textContent(selValue);
                 java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
                 out.put(key, text);
                 extracted = out;

@@ -112,14 +112,29 @@ public class PlaywrightJavaService {
         getPage().locator(cssSelector).first().fill(value == null ? "" : value);
     }
 
+    public void fillByLabel(String label, String value) {
+        ensureStarted();
+        getPage().getByLabel(label == null ? "" : label).first().fill(value == null ? "" : value);
+    }
+
     public void click(String cssSelector) {
         ensureStarted();
         getPage().locator(cssSelector).first().click();
     }
 
+    public void clickByLabel(String label) {
+        ensureStarted();
+        getPage().getByLabel(label == null ? "" : label).first().click();
+    }
+
     public void hover(String cssSelector) {
         ensureStarted();
         getPage().locator(cssSelector).first().hover();
+    }
+
+    public void hoverByLabel(String label) {
+        ensureStarted();
+        getPage().getByLabel(label == null ? "" : label).first().hover();
     }
 
     public void selectByValue(String cssSelector, String value) {

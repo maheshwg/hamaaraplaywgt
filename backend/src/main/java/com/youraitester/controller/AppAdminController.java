@@ -492,8 +492,10 @@ public class AppAdminController {
             el.setSelectorType(req.getSelectorType());
             el.setSelector(req.getSelector());
             el.setFrameSelector(req.getFrameSelector());
-            el.setElementType(req.getElementType());
-            el.setActionsSupported(req.getActionsSupported());
+            // Keep the element registry minimal: elementName + selector (+ optional frameSelector).
+            // We intentionally do not persist elementType/actionsSupported to keep the model lightweight.
+            el.setElementType(null);
+            el.setActionsSupported(null);
             el.setScreen(screen);
             managed.add(el);
         }

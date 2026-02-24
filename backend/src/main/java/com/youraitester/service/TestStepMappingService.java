@@ -18,10 +18,13 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Save-time mapping:
@@ -75,15 +78,32 @@ public class TestStepMappingService {
         App app = appRepository.findById(test.getAppId())
             .orElseThrow(() -> new RuntimeException("App not found: " + test.getAppId()));
 
-        if (app.getScreens() == null || app.getScreens().isEmpty()) {
-            log.warn("[MAP] No screens configured for appId={} - cannot map steps", test.getAppId());
-            return;
+        // In DB_METHOD_BODY mode, screens/elements come from DB and are required to map.
+        // In JAR_PLUGIN mode, methods can come from the plugin jar, so we can still map call_method
+        // even when there are no DB screens configured.
+        if (app.getExecutionMode() != App.ExecutionMode.JAR_PLUGIN) {
+            if (app.getScreens() == null || app.getScreens().isEmpty()) {
+                log.warn("[MAP] No screens configured for appId={} - cannot map steps", test.getAppId());
+                return;
+            }
         }
 
         // Candidate screen names
         List<String> screenNames = new ArrayList<>();
-        for (Screen s : app.getScreens()) {
+        List<Screen> dbScreens = app.getScreens() != null ? app.getScreens() : List.of();
+        for (Screen s : dbScreens) {
             if (s != null && s.getName() != null && !s.getName().isBlank()) screenNames.add(s.getName());
+        }
+        // If in JAR_PLUGIN mode and DB has no screens, derive candidate screen names from plugin jar.
+        if (screenNames.isEmpty() && app.getExecutionMode() == App.ExecutionMode.JAR_PLUGIN) {
+            try {
+                var lp = pluginJarLoaderService.loadForApp(app);
+                if (lp.plugin().getScreenNames() != null) {
+                    screenNames.addAll(lp.plugin().getScreenNames());
+                }
+            } catch (Exception e) {
+                log.warn("[MAP] JAR_PLUGIN enabled but plugin could not be loaded for candidate screens. {}", e.getMessage());
+            }
         }
 
         String lastScreen = null;
@@ -94,15 +114,54 @@ public class TestStepMappingService {
             String instr = step.getInstruction();
             executedSoFar.add(instr != null ? instr : "");
 
+            // Deterministic override: prefer a common "nth input field" helper method when available.
+            // This avoids the LLM choosing an arbitrary element like #textarea when the intent is positional input selection.
+            if (instr != null && !instr.isBlank()) {
+                NthInputParsed nth = parseNthInputInstruction(instr);
+                if (nth != null) {
+                    MethodMatch forced = tryMapNthInputToCommonMethod(app, step, instr, dbScreens, lastScreen);
+                    if (forced != null) {
+                        lastScreen = forced.screenName;
+                        continue;
+                    }
+                    // If the user didn't specify a concrete element name, we MUST NOT guess an arbitrary element.
+                    // Leave it unmapped so the user can add/enable the helper method (or explicitly name a target).
+                    log.warn("[MAP] Nth-input instruction detected but enterValueInNthInputField was not found/exposed. Leaving step unmapped. order={} instruction='{}'", step.getOrder(), instr);
+                    continue;
+                }
+            }
+
             Parsed parsed = Parsed.parse(instr);
+
+            // Prefer deterministic mapping for already-structured instructions when we can resolve an element.
+            // This prevents the LLM from "guessing" a wrong target (e.g., mapping "password" to an email field).
+            if (parsed != null && parsed.elementName != null && !parsed.elementName.isBlank()) {
+                if (!"navigate".equals(parsed.action) && !"call_method".equals(parsed.action)) {
+                    Match dm = resolveBestAcrossScreens(dbScreens, parsed.elementName, instr, lastScreen);
+                    if (dm != null) {
+                        lastScreen = dm.screenName;
+                        step.setType(parsed.action);
+                        step.setSelector(dm.selector);
+                        step.setValue(parsed.value);
+                        log.info("[MAP] Deterministic mapping chosen (skip LLM). order={} action={} screen='{}' element='{}' selector='{}' value={}",
+                            step.getOrder(),
+                            parsed.action,
+                            dm.screenName,
+                            dm.elementName,
+                            dm.selector,
+                            valueForLog(dm.elementName, parsed.value));
+                        continue;
+                    }
+                }
+            }
 
             // LLM mapping: if enabled + provider available, try to map the instruction to known elements/methods.
             // This is the "intelligent" path for natural English like "add to cart product named X".
             if (mappingLlmEnabled && (mappingLlmPrefer || parsed == null)) {
                 try {
-                    LlmMapped mapped = tryMapWithLlm(app, app.getScreens(), screenNames, lastScreen, executedSoFar, instr);
+                    LlmMapped mapped = tryMapWithLlm(app, dbScreens, screenNames, lastScreen, executedSoFar, instr);
                     if (mapped != null) {
-                        applyMappedStep(step, mapped, app.getScreens());
+                        applyMappedStep(step, mapped, dbScreens);
                         if (mapped.screen != null) lastScreen = mapped.screen;
                         continue;
                     }
@@ -129,7 +188,11 @@ public class TestStepMappingService {
 
             // Method call steps: resolve method across screens; store as call_method with "screen::method" in selector.
             if ("call_method".equals(parsed.action)) {
-                MethodMatch mm = resolveMethodAcrossScreens(app.getScreens(), parsed.elementName, lastScreen);
+                MethodMatch mm = resolveMethodAcrossScreens(dbScreens, parsed.elementName, lastScreen);
+                // In JAR_PLUGIN mode, allow resolving methods from the plugin jar even when DB screens/methods are empty.
+                if (mm == null && app.getExecutionMode() == App.ExecutionMode.JAR_PLUGIN) {
+                    mm = resolveMethodAcrossPlugin(app, parsed.elementName, lastScreen);
+                }
                 if (mm == null) {
                     log.warn("[MAP] Could not resolve method for step. order={} method='{}' instruction='{}'",
                         step.getOrder(), parsed.elementName, instr);
@@ -145,13 +208,13 @@ public class TestStepMappingService {
             }
 
             // Resolve element across screens.
-            Match match = resolveAcrossScreens(app.getScreens(), parsed.elementName, lastScreen);
+            Match match = resolveBestAcrossScreens(dbScreens, parsed.elementName, instr, lastScreen);
             if (match == null) {
                 // If ambiguous, try screen inference among candidate screens that contain a likely match.
-                List<String> candidates = candidateScreensForElement(app.getScreens(), parsed.elementName);
+                List<String> candidates = candidateScreensForElement(dbScreens, parsed.elementName);
                 if (!candidates.isEmpty()) {
                     String inferred = screenInferenceService.inferScreenName(app.getInfo(), candidates, executedSoFar, lastScreen);
-                    match = resolveWithinScreen(app.getScreens(), inferred, parsed.elementName);
+                    match = resolveWithinScreen(dbScreens, inferred, parsed.elementName);
                 }
             }
 
@@ -177,6 +240,291 @@ public class TestStepMappingService {
                 valueForLog(match.elementName, parsed.value));
         }
     }
+
+    /**
+     * If the instruction looks like: "enter X in 4th input field" / "enter X in fourth input field",
+     * and a method named enterValueInNthInputField exists (prefer screen "commonpage"), map to call_method.
+     *
+     * Returns the chosen MethodMatch when applied, else null.
+     */
+    private MethodMatch tryMapNthInputToCommonMethod(App app, TestStep step, String instruction, List<Screen> screens, String lastScreen) {
+        if (step == null || instruction == null || screens == null) return null;
+
+        NthInputParsed p = parseNthInputInstruction(instruction);
+        if (p == null) return null;
+
+        final String methodName = "enterValueInNthInputField";
+
+        // In JAR_PLUGIN mode, we treat nth-input instructions as a direct call to commonpage helpers.
+        // Do not leave these blank and do not guess random elements.
+        if (app != null && app.getExecutionMode() == App.ExecutionMode.JAR_PLUGIN) {
+            List<String> args = List.of(String.valueOf(p.index), p.value);
+            // Best-effort: infer arg order from plugin signature, but never fail mapping if plugin can't load.
+            try {
+                var lp = pluginJarLoaderService.loadForApp(app);
+                var plugin = lp.plugin();
+                if (plugin != null) {
+                    Class<?> cls = plugin.getScreenClass("commonpage");
+                    List<String> inferred = inferNthInputArgsFromReflection(cls, methodName, p.index, p.value);
+                    if (inferred != null && inferred.size() == 2) args = inferred;
+                }
+            } catch (Exception ignored) {}
+
+            step.setType("call_method");
+            step.setSelector("commonpage::" + methodName);
+            try {
+                step.setValue(objectMapper.writeValueAsString(args));
+            } catch (Exception e) {
+                step.setValue(String.valueOf(args));
+            }
+            log.info("[MAP] Forced nth-input mapping (JAR_PLUGIN direct). order={} selector={} args={}",
+                step.getOrder(), step.getSelector(), args);
+            return new MethodMatch("commonpage", methodName);
+        }
+
+        com.youraitester.plugin.api.AppPlugin plugin = null;
+        if (app != null && app.getExecutionMode() == App.ExecutionMode.JAR_PLUGIN) {
+            try {
+                var lp = pluginJarLoaderService.loadForApp(app);
+                plugin = lp.plugin();
+            } catch (Exception e) {
+                log.warn("[MAP] Nth-input override: failed to load plugin for method discovery (falling back to DB methods). {}", e.getMessage());
+            }
+        }
+
+        // JAR_PLUGIN fast-path: if the plugin exposes commonpage.enterValueInNthInputField, map directly.
+        // This avoids any ambiguity/heuristics when the user's instruction is purely positional.
+        if (app != null && app.getExecutionMode() == App.ExecutionMode.JAR_PLUGIN && plugin != null) {
+            try {
+                Class<?> cls = plugin.getScreenClass("commonpage");
+                if (cls != null) {
+                    boolean has = false;
+                    for (Method m : cls.getMethods()) {
+                        if (m == null) continue;
+                        if (m.getDeclaringClass() == Object.class) continue;
+                        if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+                        if (m.getName() != null && m.getName().equalsIgnoreCase(methodName)) { has = true; break; }
+                    }
+                    if (has) {
+                        List<String> args = inferNthInputArgsFromReflection(cls, methodName, p.index, p.value);
+                        if (args == null || args.size() != 2) args = List.of(String.valueOf(p.index), p.value);
+                        step.setType("call_method");
+                        step.setSelector("commonpage::" + methodName);
+                        try {
+                            step.setValue(objectMapper.writeValueAsString(args));
+                        } catch (Exception e) {
+                            step.setValue(String.valueOf(args));
+                        }
+                        log.info("[MAP] Forced nth-input mapping (JAR_PLUGIN fast-path). order={} selector={} args={}",
+                            step.getOrder(), step.getSelector(), args);
+                        return new MethodMatch("commonpage", methodName);
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // Prefer resolving from plugin directly in JAR_PLUGIN mode (most reliable), else fall back to DB registry.
+        MethodMatch mm = null;
+        if (app != null && app.getExecutionMode() == App.ExecutionMode.JAR_PLUGIN) {
+            mm = resolveMethodAcrossPlugin(app, methodName, "commonpage");
+            if (mm == null) mm = resolveMethodAcrossPlugin(app, methodName, lastScreen);
+        }
+        if (mm == null) {
+            // DB fallback (DB_METHOD_BODY)
+            mm = resolveMethodAcrossScreens(screens, methodName, "commonpage");
+            if (mm == null) mm = resolveMethodAcrossScreens(screens, methodName, lastScreen);
+        }
+        if (mm == null) return null;
+
+        ScreenMethod sm = findScreenMethod(screens, mm.screenName, mm.methodName); // DB params (if present)
+        List<String> args = buildNthInputArgs(sm, p.index, p.value);
+
+        // If DB method params are not available, try to infer argument order from plugin method signature.
+        if ((sm == null || sm.getParams() == null || sm.getParams().isEmpty()) && plugin != null) {
+            try {
+                Class<?> cls = plugin.getScreenClass(mm.screenName);
+                List<String> inferred = inferNthInputArgsFromReflection(cls, mm.methodName, p.index, p.value);
+                if (inferred != null && inferred.size() == 2) args = inferred;
+            } catch (Exception ignored) {}
+        }
+
+        step.setType("call_method");
+        step.setSelector(mm.screenName + "::" + mm.methodName);
+        try {
+            step.setValue(objectMapper.writeValueAsString(args));
+        } catch (Exception e) {
+            // Fallback to a best-effort single string
+            step.setValue(String.valueOf(args));
+        }
+
+        log.info("[MAP] Forced nth-input mapping to method. order={} screen='{}' method='{}' args={}",
+            step.getOrder(), mm.screenName, mm.methodName, args);
+        return mm;
+    }
+
+    private List<String> inferNthInputArgsFromReflection(Class<?> cls, String methodName, int index, String value) {
+        if (cls == null || methodName == null) return null;
+        for (Method m : cls.getMethods()) {
+            if (m == null) continue;
+            if (!m.getName().equalsIgnoreCase(methodName)) continue;
+            if (m.getParameterCount() != 2) continue;
+            Class<?>[] pt = m.getParameterTypes();
+            if (pt.length != 2) continue;
+
+            boolean p0Int = (pt[0] == int.class || pt[0] == Integer.class);
+            boolean p1Int = (pt[1] == int.class || pt[1] == Integer.class);
+            boolean p0Str = (pt[0] == String.class);
+            boolean p1Str = (pt[1] == String.class);
+
+            if (p0Int && p1Str) return List.of(String.valueOf(index), value);
+            if (p0Str && p1Int) return List.of(value, String.valueOf(index));
+
+            // fallback if both are strings: pass index as string first, then value
+            if (p0Str && p1Str) return List.of(String.valueOf(index), value);
+
+            // unknown types, keep default
+            return List.of(String.valueOf(index), value);
+        }
+        return null;
+    }
+
+    private ScreenMethod findScreenMethod(List<Screen> screens, String screenName, String methodName) {
+        if (screens == null || screenName == null || methodName == null) return null;
+        for (Screen s : screens) {
+            if (s == null || s.getName() == null) continue;
+            if (!s.getName().equalsIgnoreCase(screenName)) continue;
+            if (s.getMethods() == null) return null;
+            for (ScreenMethod m : s.getMethods()) {
+                if (m == null || m.getMethodName() == null) continue;
+                if (m.getMethodName().equalsIgnoreCase(methodName)) return m;
+            }
+            return null;
+        }
+        return null;
+    }
+
+    private List<String> buildNthInputArgs(ScreenMethod sm, int index, String value) {
+        // Default guess: (nth, value)
+        List<String> defaultArgs = List.of(String.valueOf(index), value);
+        if (sm == null || sm.getParams() == null || sm.getParams().isEmpty()) return defaultArgs;
+
+        // If method expects exactly 2 params, order them based on type/name heuristics.
+        if (sm.getParams().size() == 2) {
+            String t0 = sm.getParams().get(0) != null ? sm.getParams().get(0).getType() : null;
+            String t1 = sm.getParams().get(1) != null ? sm.getParams().get(1).getType() : null;
+            String n0 = sm.getParams().get(0) != null ? sm.getParams().get(0).getName() : null;
+            String n1 = sm.getParams().get(1) != null ? sm.getParams().get(1).getName() : null;
+
+            boolean p0Int = isIntType(t0) || looksLikeIndexParamName(n0);
+            boolean p1Int = isIntType(t1) || looksLikeIndexParamName(n1);
+
+            if (p0Int && !p1Int) return List.of(String.valueOf(index), value);
+            if (!p0Int && p1Int) return List.of(value, String.valueOf(index));
+        }
+
+        // For other arities, keep default in first two slots and ignore extras (user can refine later).
+        return defaultArgs;
+    }
+
+    private boolean isIntType(String type) {
+        if (type == null) return false;
+        String t = type.trim().toLowerCase(Locale.ROOT);
+        return t.equals("int") || t.equals("integer") || t.endsWith(".integer");
+    }
+
+    private boolean looksLikeIndexParamName(String name) {
+        if (name == null) return false;
+        String n = name.trim().toLowerCase(Locale.ROOT);
+        return n.contains("index") || n.contains("idx") || n.contains("nth") || n.contains("position") || n.contains("pos") || n.contains("number") || n.equals("n");
+    }
+
+    // Accept common variants:
+    // - "enter X in 4th input field"
+    // - "enter X in fourth input"
+    // - "enter X in no.4 input"
+    // - "enter X in input #4"
+    // - "enter X in input number 4"
+    // - "enter X in input 4"
+    private static final Pattern NTH_INPUT_PATTERN_A = Pattern.compile(
+        "(?i)^\\s*(?:enter|type|fill)\\s+(.+?)\\s+(?:in|into)\\s+(?:the\\s+)?(.+?)\\s+input(?:\\s+(?:field|box))?\\s*$"
+    );
+    private static final Pattern NTH_INPUT_PATTERN_B = Pattern.compile(
+        "(?i)^\\s*(?:enter|type|fill)\\s+(.+?)\\s+(?:in|into)\\s+(?:the\\s+)?input\\s+(.+?)\\s*$"
+    );
+
+    private NthInputParsed parseNthInputInstruction(String instruction) {
+        if (instruction == null) return null;
+        String trimmed = instruction.trim();
+
+        Matcher m = NTH_INPUT_PATTERN_A.matcher(trimmed);
+        if (!m.matches()) {
+            m = NTH_INPUT_PATTERN_B.matcher(trimmed);
+        }
+        if (!m.matches()) return null;
+
+        String rawValue = m.group(1) != null ? m.group(1).trim() : null;
+        String ordinal = m.group(2) != null ? m.group(2).trim() : null;
+        if (rawValue == null || rawValue.isBlank() || ordinal == null || ordinal.isBlank()) return null;
+
+        String value = stripWrappingQuotes(rawValue);
+        Integer idx = parseOrdinalToInt(ordinal);
+        if (idx == null || idx <= 0) return null;
+        return new NthInputParsed(idx, value);
+    }
+
+    private String stripWrappingQuotes(String s) {
+        if (s == null) return null;
+        String v = s.trim();
+        if (v.length() >= 2) {
+            char a = v.charAt(0);
+            char b = v.charAt(v.length() - 1);
+            if ((a == '"' && b == '"') || (a == '\'' && b == '\'')) {
+                return v.substring(1, v.length() - 1);
+            }
+        }
+        return v;
+    }
+
+    private Integer parseOrdinalToInt(String ordinal) {
+        if (ordinal == null) return null;
+        String o = ordinal.trim().toLowerCase(Locale.ROOT);
+
+        // digits anywhere (e.g., "4th", "input 4", "4")
+        Matcher dm = Pattern.compile("(\\d+)").matcher(o);
+        if (dm.find()) {
+            try { return Integer.parseInt(dm.group(1)); } catch (Exception ignored) {}
+        }
+
+        Map<String, Integer> word = new HashMap<>();
+        word.put("first", 1);
+        word.put("second", 2);
+        word.put("third", 3);
+        word.put("fourth", 4);
+        word.put("fifth", 5);
+        word.put("sixth", 6);
+        word.put("seventh", 7);
+        word.put("eighth", 8);
+        word.put("ninth", 9);
+        word.put("tenth", 10);
+        // also accept cardinals (people often say "input 4" or "number four")
+        word.put("one", 1);
+        word.put("two", 2);
+        word.put("three", 3);
+        word.put("four", 4);
+        word.put("five", 5);
+        word.put("six", 6);
+        word.put("seven", 7);
+        word.put("eight", 8);
+        word.put("nine", 9);
+        word.put("ten", 10);
+
+        for (var e : word.entrySet()) {
+            if (o.contains(e.getKey())) return e.getValue();
+        }
+        return null;
+    }
+
+    private record NthInputParsed(int index, String value) {}
 
     private void applyMappedStep(TestStep step, LlmMapped mapped, List<Screen> screens) {
         if (mapped == null) return;
@@ -407,6 +755,14 @@ public class TestStepMappingService {
         for (String s : pluginScreens) {
             if (s != null && !s.isBlank() && !containsIgnoreCase(names, s)) names.add(s);
         }
+        // Convention: allow a "commonpage" screen to be globally available even if plugin.getScreenNames()
+        // didn't include it, as long as plugin.getScreenClass("commonpage") returns a class.
+        try {
+            Class<?> commonCls = plugin.getScreenClass("commonpage");
+            if (commonCls != null && !containsIgnoreCase(names, "commonpage")) {
+                names.add("commonpage");
+            }
+        } catch (Exception ignored) {}
         if (dbScreens != null) {
             for (Screen s : dbScreens) {
                 if (s == null || s.getName() == null || s.getName().isBlank()) continue;
@@ -481,6 +837,9 @@ public class TestStepMappingService {
         sb.append("Rules:\n");
         sb.append("- If instruction is navigation, action=navigate, targetType=none, target=null, value=url.\n");
         sb.append("- If instruction implies calling a stored method (e.g., 'add to cart ...', 'login with ...'), use action=call_method and targetType=method.\n");
+        sb.append("- If instruction refers to an ordinal/nth input field (e.g., 'enter X in 4th input field' / 'enter X in fourth input field'), prefer action=call_method targeting method enterValueInNthInputField when available; pass args in the method's param order (nth/index and value).\n");
+        sb.append("- If instruction says input/text field, treat HTML <input> and <textarea> as equivalent. Prefer targeting an element whose selector contains \"input\" or \"textarea\".\n");
+        sb.append("- If a method exists on screen \"commonpage\", it may be used from ANY step, regardless of the current page. Prefer commonpage methods when the instruction is generic and could apply on multiple pages.\n");
         sb.append("- For call_method, put arguments in args[] (in order). value can be null.\n");
         sb.append("- If the user explicitly asks to store the result (e.g. 'store ... as {{price}}'), set export=\"price\".\n");
         sb.append("- Only set export when the user explicitly provides a variable name.\n");
@@ -499,6 +858,8 @@ public class TestStepMappingService {
                 sb.append("- ").append(s.getName()).append(":\n");
                 sb.append("  elements: ");
                 sb.append(listNames(s.getElements() != null ? s.getElements().stream().map(ScreenElement::getElementName).toList() : List.of(), 80));
+                sb.append("\n  elementsDetailed(name=>selector): ");
+                sb.append(listElementDetails(s.getElements(), 80));
                 sb.append("\n  methods: ");
                 sb.append(listNames(s.getMethods() != null ? s.getMethods().stream().map(m -> m.getMethodName()).toList() : List.of(), 40));
                 sb.append("\n");
@@ -506,6 +867,21 @@ public class TestStepMappingService {
         }
 
         return sb.toString();
+    }
+
+    private String listElementDetails(List<ScreenElement> els, int max) {
+        if (els == null || els.isEmpty()) return "[]";
+        List<String> out = new ArrayList<>();
+        for (ScreenElement el : els) {
+            if (el == null) continue;
+            String n = el.getElementName();
+            String sel = el.getSelector();
+            if (n == null || n.isBlank() || sel == null || sel.isBlank()) continue;
+            // Keep it compact and deterministic for prompt
+            out.add(n + "=>" + sel);
+            if (out.size() >= max) break;
+        }
+        return out.toString();
     }
 
     private String listNames(List<String> names, int max) {
@@ -562,7 +938,7 @@ public class TestStepMappingService {
                 if (el == null || el.getElementName() == null || el.getSelector() == null) continue;
                 String have = norm(el.getElementName());
                 if (have.equals(want) || have.contains(want) || want.contains(have)) {
-                    matches.add(new Match(s.getName(), el.getElementName(), el.getSelector()));
+                    matches.add(new Match(s.getName(), el.getElementName(), formatElementSelector(el)));
                 }
             }
         }
@@ -610,11 +986,83 @@ public class TestStepMappingService {
                 if (el == null || el.getElementName() == null || el.getSelector() == null) continue;
                 String have = norm(el.getElementName());
                 if (have.equals(want) || have.contains(want) || want.contains(have)) {
-                    return new Match(s.getName(), el.getElementName(), el.getSelector());
+                    return new Match(s.getName(), el.getElementName(), formatElementSelector(el));
                 }
             }
         }
         return null;
+    }
+
+    private String formatElementSelector(ScreenElement el) {
+        if (el == null) return null;
+        String st = el.getSelectorType();
+        String sel = el.getSelector();
+        if (sel == null) return null;
+        if (st == null || st.isBlank() || "css".equalsIgnoreCase(st)) return sel;
+        // Encode non-css selector types into the selector string so the runner can interpret them.
+        return st + "::" + sel;
+    }
+
+    private Match resolveBestAcrossScreens(List<Screen> screens, String elementFromStep, String instruction, String lastScreen) {
+        if (screens == null || elementFromStep == null) return null;
+        String want = norm(elementFromStep);
+        if (want.isBlank()) return null;
+
+        List<Match> matches = new ArrayList<>();
+        for (Screen s : screens) {
+            if (s == null || s.getName() == null || s.getElements() == null) continue;
+            for (ScreenElement el : s.getElements()) {
+                if (el == null || el.getElementName() == null || el.getSelector() == null) continue;
+                String have = norm(el.getElementName());
+                if (have.equals(want) || have.contains(want) || want.contains(have)) {
+                    matches.add(new Match(s.getName(), el.getElementName(), formatElementSelector(el)));
+                }
+            }
+        }
+        if (matches.isEmpty()) return null;
+        if (matches.size() == 1) return matches.get(0);
+
+        String instr = instruction != null ? instruction.toLowerCase(Locale.ROOT) : "";
+        Match best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (Match m : matches) {
+            int score = 0;
+            String have = norm(m.elementName);
+            if (have.equals(want)) score += 200;
+            if (have.startsWith(want)) score += 120;
+            if (have.contains(want)) score += 80;
+            if (want.contains(have)) score += 40;
+            if (lastScreen != null && m.screenName != null && m.screenName.equalsIgnoreCase(lastScreen)) score += 30;
+
+            // keyword boosts to avoid LLM-style mistakes
+            score += keywordBoost(instr, have, "password");
+            score += keywordBoost(instr, have, "email");
+            score += keywordBoost(instr, have, "phone");
+            score += keywordBoost(instr, have, "username");
+            score += keywordBoost(instr, have, "user");
+
+            // penalties: if instruction says password, avoid email/phone
+            if (instr.contains("password")) {
+                if (have.contains("email")) score -= 60;
+                if (have.contains("phone")) score -= 60;
+            }
+            if (instr.contains("email")) {
+                if (have.contains("password")) score -= 40;
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = m;
+            }
+        }
+        return best;
+    }
+
+    private int keywordBoost(String instr, String elementNorm, String kw) {
+        if (instr == null || elementNorm == null || kw == null) return 0;
+        String k = kw.toLowerCase(Locale.ROOT);
+        if (!instr.contains(k)) return 0;
+        return elementNorm.contains(k) ? 120 : 0;
     }
 
     private MethodMatch resolveMethodAcrossScreens(List<Screen> screens, String methodFromStep, String lastScreen) {
@@ -641,6 +1089,59 @@ public class TestStepMappingService {
             }
         }
         return null;
+    }
+
+    private MethodMatch resolveMethodAcrossPlugin(App app, String methodFromStep, String lastScreen) {
+        if (app == null || methodFromStep == null) return null;
+        String want = methodFromStep.trim().toLowerCase(Locale.ROOT);
+        try {
+            var lp = pluginJarLoaderService.loadForApp(app);
+            var plugin = lp.plugin();
+            if (plugin == null) return null;
+
+            List<MethodMatch> matches = new ArrayList<>();
+            List<String> pluginScreens = new ArrayList<>();
+            if (plugin.getScreenNames() != null) pluginScreens.addAll(plugin.getScreenNames());
+            // Also include "commonpage" if available by convention.
+            try {
+                Class<?> commonCls = plugin.getScreenClass("commonpage");
+                if (commonCls != null && pluginScreens.stream().noneMatch(s -> s != null && s.equalsIgnoreCase("commonpage"))) {
+                    pluginScreens.add("commonpage");
+                }
+            } catch (Exception ignored) {}
+
+            for (String screen : pluginScreens) {
+                if (screen == null || screen.isBlank()) continue;
+                Class<?> cls = null;
+                try { cls = plugin.getScreenClass(screen); } catch (Exception ignored) {}
+                if (cls == null) continue;
+                for (Method m : cls.getMethods()) {
+                    if (m == null) continue;
+                    if (m.getDeclaringClass() == Object.class) continue;
+                    if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+                    String have = m.getName() != null ? m.getName().trim().toLowerCase(Locale.ROOT) : "";
+                    if (have.equals(want)) {
+                        matches.add(new MethodMatch(screen, m.getName()));
+                    }
+                }
+            }
+            if (matches.isEmpty()) return null;
+            if (matches.size() == 1) return matches.get(0);
+            if (lastScreen != null) {
+                for (MethodMatch mm : matches) {
+                    if (mm.screenName != null && mm.screenName.equalsIgnoreCase(lastScreen)) return mm;
+                }
+            }
+            // If still ambiguous, prefer commonpage (global helpers)
+            for (MethodMatch mm : matches) {
+                if (mm.screenName != null && mm.screenName.equalsIgnoreCase("commonpage")) return mm;
+            }
+            // ambiguous
+            return null;
+        } catch (Exception e) {
+            log.warn("[MAP] Failed to resolve method from plugin. appId={} method={} err={}", app.getId(), methodFromStep, e.getMessage());
+            return null;
+        }
     }
 
     private String norm(String s) {

@@ -77,6 +77,7 @@ Rules:
   Example: capture product name into {{product1}}.
 - Keep it concise: 6 to 12 steps unless the flow truly requires more.
 - If login is likely required based on APP_INFO, include it; otherwise keep login optional in wording.
+- IMPORTANT: Do NOT include a "navigate to" or "go to" step as the first step. The test runner automatically navigates to the application URL before executing test steps.
 """;
 
         String user = "APP_INFO:\n" + appInfo + "\n\nUSER_FLOW:\n" + flowText.trim();

@@ -144,7 +144,60 @@ public class TestController {
         // and we must NOT spend LLM tokens in those cases.
         if (test.getSteps() != null) {
             try {
+                Long appId = existing.getAppId();
+                String appName = null;
+                String mode = null;
+                try {
+                    if (appId != null) {
+                        var a = appRepository.findById(appId).orElse(null);
+                        if (a != null) {
+                            appName = a.getName();
+                            mode = a.getExecutionMode() != null ? a.getExecutionMode().name() : null;
+                        }
+                    }
+                } catch (Exception ignored) {}
+
+                log.info("[SAVE-MAP] Starting save-time mapping. testId={} appId={} appName='{}' executionMode={} appUrl='{}' steps={}",
+                    id,
+                    appId,
+                    appName,
+                    mode,
+                    existing.getAppUrl(),
+                    existing.getSteps() != null ? existing.getSteps().size() : 0
+                );
+
                 testStepMappingService.mapTestSteps(existing);
+
+                // Summarize results
+                int total = existing.getSteps() != null ? existing.getSteps().size() : 0;
+                int mapped = 0;
+                int blank = 0;
+                int nthDetected = 0;
+                int nthMapped = 0;
+                if (existing.getSteps() != null) {
+                    for (TestStep s : existing.getSteps()) {
+                        if (s == null) continue;
+                        boolean hasMap = s.getType() != null && !s.getType().isBlank()
+                            && s.getSelector() != null && !s.getSelector().isBlank();
+                        if (hasMap) mapped++;
+                        else blank++;
+                        String instr = s.getInstruction() != null ? s.getInstruction().toLowerCase() : "";
+                        if (instr.contains("input") && (instr.contains("nth") || instr.contains("no.") || instr.contains("#") || instr.contains("first") || instr.contains("second") || instr.contains("third") || instr.contains("fourth") || instr.contains("fifth") || instr.contains("6th") || instr.contains("7th") || instr.contains("8th") || instr.contains("9th") || instr.contains("10th"))) {
+                            nthDetected++;
+                            if (hasMap && "call_method".equalsIgnoreCase(s.getType()) && s.getSelector().toLowerCase().contains("entervalueinnthinputfield")) {
+                                nthMapped++;
+                            } else if (!hasMap) {
+                                // log the problematic step in full
+                                log.warn("[SAVE-MAP] Nth-input-like step still unmapped. order={} instruction='{}'", s.getOrder(), s.getInstruction());
+                            } else {
+                                log.warn("[SAVE-MAP] Nth-input-like step mapped unexpectedly. order={} type={} selector={} value={}",
+                                    s.getOrder(), s.getType(), s.getSelector(), s.getValue());
+                            }
+                        }
+                    }
+                }
+                log.info("[SAVE-MAP] Mapping summary. testId={} mappedSteps={} blankSteps={} totalSteps={} nthDetected={} nthMapped={}",
+                    id, mapped, blank, total, nthDetected, nthMapped);
             } catch (Exception e) {
                 log.warn("Save-time step mapping failed for updateTest id={} (continuing without mappings). {}", id, e.getMessage());
             }
